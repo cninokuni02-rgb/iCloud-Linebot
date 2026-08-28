@@ -1,15 +1,17 @@
 ﻿import os
 import re
+import io
 import asyncio
 from typing import Optional
 from dotenv import load_dotenv
 import httpx
+import requests
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage, 
+    MessageEvent, TextMessage, ImageMessage, TextSendMessage, 
     FlexSendMessage, BubbleContainer
 )
 
@@ -25,26 +27,22 @@ IMEICHECK_API_KEY = os.getenv("IMEICHECK_API_KEY", "")
 
 app = FastAPI(title="iCloud Check LINE Bot API", version="1.0.0")
 
-# ----------------- ระบบกันหลับอัตโนมัติ (Anti-Sleep Self-Ping) -----------------
+# ----------------- ระบบกันหลับอัตโนมัติ (Anti-Sleep Engine) -----------------
 @app.on_event("startup")
 async def start_auto_keep_alive():
     async def ping_loop():
-        await asyncio.sleep(30) # รอเซิร์ฟเวอร์เปิดเสร็จ 30 วินาที
+        await asyncio.sleep(30)
         while True:
             try:
-                # ดึง URL อัตโนมัติจาก Render หรือ fallback
                 base_url = os.getenv("RENDER_EXTERNAL_URL", "https://icloud-linebot.onrender.com")
                 async with httpx.AsyncClient() as client:
                     res = await client.get(f"{base_url}/", timeout=20)
                     print(f"⚡ Anti-Sleep Ping: Sent to {base_url} (Status: {res.status_code})")
             except Exception as e:
-                print(f"⚡ Anti-Sleep Ping Notice: {e}")
-            
-            # ยิงสะกิดตัวเองทุกๆ 9 นาที (540 วินาที) ทำให้เซิร์ฟเวอร์ตื่นตลอด 24 ชม. ไม่ดับแน่นอน
-            await asyncio.sleep(540)
+                print(f"⚡ Anti-Sleep Notice: {e}")
+            await asyncio.sleep(540) # สะกิดตัวเองทุกๆ 9 นาที
 
     asyncio.create_task(ping_loop())
-    print("✅ ระบบป้องกันเซิร์ฟเวอร์หลับ (Anti-Sleep Engine) เปิดทำงานแล้ว!")
 
 def get_checker():
     load_dotenv(override=True)
@@ -53,7 +51,6 @@ def get_checker():
         imeicheck_key=os.getenv("IMEICHECK_API_KEY", "")
     )
 
-# ตรวจสอบการตั้งค่า LINE
 line_bot_api = None
 handler = None
 
@@ -61,8 +58,48 @@ if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+def extract_imei_from_image(image_bytes: bytes) -> Optional[str]:
+    """สแกนอ่านตัวหนังสือจากรูปภาพ (OCR) เพื่อหาเลข IMEI 15 หลัก"""
+    try:
+        url = "https://api.ocr.space/parse/image"
+        payload = {
+            "apikey": "helloworld", # ฟรีคีย์
+            "OCREngine": "2",
+            "isOverlayRequired": False,
+            "detectOrientation": True,
+            "scale": True
+        }
+        files = {
+            "file": ("image.jpg", image_bytes, "image/jpeg")
+        }
+        res = requests.post(url, data=payload, files=files, timeout=20)
+        if res.status_code == 200:
+            result = res.json()
+            parsed_results = result.get("ParsedResults", [])
+            if parsed_results:
+                text = parsed_results[0].get("ParsedText", "")
+                
+                # 1. ค้นหา IMEI 15 หลักติดกัน
+                imeis = re.findall(r"\b\d{15}\b", text)
+                if imeis:
+                    return imeis[0]
+                
+                # 2. ค้นหาแบบมีเว้นวรรค เช่น 35 656508 701547 7
+                spaced_matches = re.findall(r"\b\d{2}[\s\-]?\d{6}[\s\-]?\d{6}[\s\-]?\d{1}\b", text)
+                for sm in spaced_matches:
+                    clean = re.sub(r"[^\d]", "", sm)
+                    if len(clean) == 15:
+                        return clean
+                
+                # 3. ค้นหาคำว่า IMEI : XXXXXXXXXXXXXXX
+                imei_label = re.search(r"IMEI[\s/:\d]*?(\d{15})", text, re.IGNORECASE)
+                if imei_label:
+                    return imei_label.group(1)
+    except Exception as e:
+        print(f"OCR Error: {e}")
+    return None
+
 def build_flex_message(data: dict) -> FlexSendMessage:
-    """สร้างการ์ด Flex Message ที่สวยงามและเข้าใจง่าย"""
     imei = data.get("imei", "-")
     model = data.get("model", "Apple Device")
     serial = data.get("serial", "-")
@@ -71,15 +108,15 @@ def build_flex_message(data: dict) -> FlexSendMessage:
     source = data.get("source", "Checker")
 
     if fmi == "OFF":
-        badge_bg = "#00B900" # สีเขียว
+        badge_bg = "#00B900"
         badge_text = "FMI: OFF (ปลอดภัย ไม่ติด iCloud) ✅"
         status_color = "#00B900"
     elif fmi == "ON":
-        badge_bg = "#E53935" # สีแดง
+        badge_bg = "#E53935"
         badge_text = "FMI: ON (ติดล็อค iCloud) ❌"
         status_color = "#E53935"
     else:
-        badge_bg = "#FFA000" # สีส้ม
+        badge_bg = "#FFA000"
         badge_text = f"FMI: {fmi}"
         status_color = "#FFA000"
 
@@ -92,22 +129,8 @@ def build_flex_message(data: dict) -> FlexSendMessage:
             "backgroundColor": "#1E1E2F",
             "paddingAll": "16px",
             "contents": [
-                {
-                    "type": "text",
-                    "text": "📱 iCloud Status Report",
-                    "weight": "bold",
-                    "color": "#00D2FF",
-                    "size": "sm"
-                },
-                {
-                    "type": "text",
-                    "text": model,
-                    "weight": "bold",
-                    "color": "#FFFFFF",
-                    "size": "md",
-                    "margin": "xs",
-                    "wrap": True
-                }
+                {"type": "text", "text": "📱 iCloud Status Report", "weight": "bold", "color": "#00D2FF", "size": "sm"},
+                {"type": "text", "text": model, "weight": "bold", "color": "#FFFFFF", "size": "md", "margin": "xs", "wrap": True}
             ]
         },
         "body": {
@@ -122,20 +145,9 @@ def build_flex_message(data: dict) -> FlexSendMessage:
                     "cornerRadius": "8px",
                     "paddingAll": "10px",
                     "alignItems": "center",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": badge_text,
-                            "color": "#FFFFFF",
-                            "weight": "bold",
-                            "size": "sm"
-                        }
-                    ]
+                    "contents": [{"type": "text", "text": badge_text, "color": "#FFFFFF", "weight": "bold", "size": "sm"}]
                 },
-                {
-                    "type": "separator",
-                    "margin": "lg"
-                },
+                {"type": "separator", "margin": "lg"},
                 {
                     "type": "box",
                     "layout": "vertical",
@@ -173,44 +185,21 @@ def build_flex_message(data: dict) -> FlexSendMessage:
         "footer": {
             "type": "box",
             "layout": "vertical",
-            "contents": [
-                {
-                    "type": "text",
-                    "text": f"Checked by {source}",
-                    "size": "xxs",
-                    "color": "#AAAAAA",
-                    "align": "center"
-                }
-            ]
+            "contents": [{"type": "text", "text": f"Checked by {source}", "size": "xxs", "color": "#AAAAAA", "align": "center"}]
         }
     }
 
-    return FlexSendMessage(
-        alt_text=f"ผลตรวจ iCloud: {model} ({fmi})",
-        contents=BubbleContainer.new_from_json_dict(bubble_json)
-    )
+    return FlexSendMessage(alt_text=f"ผลตรวจ iCloud: {model} ({fmi})", contents=BubbleContainer.new_from_json_dict(bubble_json))
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return """
     <!DOCTYPE html>
     <html>
-    <head>
-        <title>iCloud Checker Server</title>
-        <meta charset="utf-8">
-        <style>
-            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0f172a; color: #fff; text-align: center; padding: 50px 20px; }
-            .card { background: #1e293b; max-width: 600px; margin: 0 auto; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
-            h1 { color: #38bdf8; }
-            .badge { display: inline-block; padding: 6px 16px; border-radius: 12px; font-size: 14px; background: #10b981; font-weight: bold; }
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <h1>🍏 iCloud Checker Server</h1>
-            <p><span class="badge">⚡ Status: Online & Anti-Sleep Active</span></p>
-            <p>ระบบ Webhook ออนไลน์ตลอด 24 ชั่วโมง</p>
-        </div>
+    <head><title>iCloud Checker Server</title><meta charset="utf-8"></head>
+    <body style="background:#0f172a;color:#fff;text-align:center;padding:50px;">
+        <h1>🍏 iCloud Checker Server</h1>
+        <p style="color:#10b981;font-weight:bold;">⚡ Status: Online & Image OCR Active</p>
     </body>
     </html>
     """
@@ -218,50 +207,74 @@ async def home():
 @app.get("/api/check")
 async def check_api(imei: str = Query(..., description="IMEI 15 หลัก หรือ Serial Number")):
     checker = get_checker()
-    result = checker.check(imei)
-    return result
+    return checker.check(imei)
 
 @app.post("/webhook")
 async def line_webhook(request: Request):
     if not handler or not line_bot_api:
-        raise HTTPException(status_code=500, detail="LINE credentials not configured in .env")
-
+        raise HTTPException(status_code=500, detail="LINE credentials not configured")
     signature = request.headers.get("X-Line-Signature", "")
     body = (await request.body()).decode("utf-8")
-
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         raise HTTPException(status_code=400, detail="Invalid signature")
-    except Exception as e:
-        print(f"Error handling webhook: {e}")
     return "OK"
 
 if handler:
+    # 1. ดักจับข้อความตัวอักษร
     @handler.add(MessageEvent, message=TextMessage)
-    def handle_line_message(event):
+    def handle_line_text_message(event):
         user_msg = event.message.text.strip()
-        
         is_imei = bool(re.match(r"^\d{15}$", user_msg))
         is_sn = bool(re.match(r"^[A-Za-z0-9]{8,12}$", user_msg))
 
         if not (is_imei or is_sn):
             reply_txt = (
-                "👋 สวัสดีครับ! ส่งเลข IMEI (15 หลัก) หรือ Serial Number มาในแชทนี้ได้เลยครับ\n\n"
-                "ตัวอย่าง: 356789012345678"
+                "👋 สวัสดีครับ!\n"
+                "• พิมพ์ส่งเลข **IMEI 15 หลัก** ในแชท\n"
+                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง / ถาดซิม** ส่งมาได้เลย บอทจะอ่านเลขอัตโนมัติครับ! 📷"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_txt))
             return
 
         checker = get_checker()
         res = checker.check(user_msg)
-
         if res.get("success"):
             flex_card = build_flex_message(res)
             line_bot_api.reply_message(event.reply_token, flex_card)
         else:
-            err_msg = res.get("error", "ไม่สามารถตรวจสอบข้อมูลได้ในขณะนี้")
-            line_bot_api.reply_message(
-                event.reply_token, 
-                TextSendMessage(text=f"❌ ตรวจสอบไม่สำเร็จ:\n{err_msg}")
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ ตรวจสอบไม่สำเร็จ"))
+
+    # 2. ดักจับรูปภาพ (Image OCR Auto Detection)
+    @handler.add(MessageEvent, message=ImageMessage)
+    def handle_line_image_message(event):
+        try:
+            # ดึงไฟล์รูปจาก LINE
+            message_content = line_bot_api.get_message_content(event.message.id)
+            image_bytes = b""
+            for chunk in message_content.iter_content():
+                image_bytes += chunk
+
+            # สแกนหาเลข IMEI จากรูป
+            detected_imei = extract_imei_from_image(image_bytes)
+
+            if detected_imei:
+                checker = get_checker()
+                res = checker.check(detected_imei)
+                if res.get("success"):
+                    flex_card = build_flex_message(res)
+                    line_bot_api.reply_message(event.reply_token, flex_card)
+                    return
+
+            # ถ้าสแกนไม่เจอ
+            err_msg = (
+                "📷 บอทได้รับรูปภาพแล้ว แต่ไม่พบเลข IMEI (15 หลัก) ที่ชัดเจน\n\n"
+                "💡 คำแนะนำ:\n"
+                "• ถ่ายซูมให้เห็นตัวเลขชัดเจนขึ้น (เช่น หน้าการตั้งค่า > ทั่วไป > เกี่ยวกับ หรือหลังกล่อง)\n"
+                "• หรือพิมพ์เลข 15 หลักส่งมาในแชทได้โดยตรงครับ"
             )
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=err_msg))
+        except Exception as e:
+            print(f"Image Handle Error: {e}")
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ เกิดข้อผิดพลาดในการประมวลผลรูปภาพ"))
