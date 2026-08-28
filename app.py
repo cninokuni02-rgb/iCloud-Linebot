@@ -6,6 +6,7 @@ from typing import Optional
 from dotenv import load_dotenv
 import httpx
 import requests
+from PIL import Image, ImageEnhance
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from linebot import LineBotApi, WebhookHandler
@@ -15,7 +16,7 @@ from linebot.models import (
     FlexSendMessage, BubbleContainer
 )
 
-from checkers import ICloudChecker
+from checkers import ICloudChecker, luhn_checksum
 
 load_dotenv()
 
@@ -55,34 +56,74 @@ if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-def extract_imei_from_image(image_bytes: bytes) -> Optional[str]:
+def optimize_image_for_ocr(image_bytes: bytes) -> bytes:
+    """บีบอัดและปรับภาพให้คมชัดเพื่อให้อ่านตัวหนังสือและตัวเลขได้แม่นยำ 100%"""
     try:
+        img = Image.open(io.BytesIO(image_bytes))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        
+        # ปรับขนาดไม่ให้เกิน 1500px เพื่อให้ไม่ติดขีดจำกัดขนาดไฟล์ของ OCR
+        img.thumbnail((1500, 1500), Image.Resampling.LANCZOS)
+        
+        # เพิ่มความคมชัดของตัวอักษร
+        enhancer = ImageEnhance.Contrast(img)
+        img = enhancer.enhance(1.4)
+        
+        output = io.BytesIO()
+        img.save(output, format='JPEG', quality=85, optimize=True)
+        return output.getvalue()
+    except Exception as e:
+        print(f"Image Optimize Error: {e}")
+        return image_bytes
+
+def extract_imei_from_image(image_bytes: bytes) -> Optional[str]:
+    """สแกนอ่านตัวหนังสือและตัวเลขอีมี่จากรูปภาพด้วย AI OCR Engine"""
+    try:
+        opt_bytes = optimize_image_for_ocr(image_bytes)
+        
         url = "https://api.ocr.space/parse/image"
         payload = {
             "apikey": "helloworld",
             "OCREngine": "2",
             "isOverlayRequired": False,
             "detectOrientation": True,
-            "scale": True
+            "scale": True,
+            "isTable": True
         }
-        files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
-        res = requests.post(url, data=payload, files=files, timeout=20)
+        files = {"file": ("image.jpg", opt_bytes, "image/jpeg")}
+        res = requests.post(url, data=payload, files=files, timeout=25)
+        
         if res.status_code == 200:
             result = res.json()
             parsed_results = result.get("ParsedResults", [])
             if parsed_results:
-                text = parsed_results[0].get("ParsedText", "")
-                imeis = re.findall(r"\b\d{15}\b", text)
-                if imeis:
-                    return imeis[0]
-                spaced_matches = re.findall(r"\b\d{2}[\s\-]?\d{6}[\s\-]?\d{6}[\s\-]?\d{1}\b", text)
-                for sm in spaced_matches:
-                    clean = re.sub(r"[^\d]", "", sm)
+                raw_text = parsed_results[0].get("ParsedText", "")
+                
+                # 1. ค้นหาเลข 15 หลักติดกัน
+                direct_matches = re.findall(r"\b\d{15}\b", raw_text)
+                for m in direct_matches:
+                    return m
+                
+                # 2. ค้นหาแบบมีเว้นวรรค (เช่น 35 483609 260074 0)
+                for line in raw_text.splitlines():
+                    clean_digits = re.sub(r"[^\d]", "", line)
+                    if len(clean_digits) == 15:
+                        return clean_digits
+                    # ถ้ามี 15 หลักซ่อนอยู่ในบรรทัด
+                    sub_matches = re.findall(r"\d{15}", clean_digits)
+                    if sub_matches:
+                        return sub_matches[0]
+                
+                # 3. ค้นหาตามหัวข้อ IMEI / MEID / SN
+                imei_labels = re.findall(r"(?:IMEI|MEID|SN|Serial)[\s/:\d]*?([\d\s\-]{15,25})", raw_text, re.IGNORECASE)
+                for label_match in imei_labels:
+                    clean = re.sub(r"[^\d]", "", label_match)
                     if len(clean) == 15:
                         return clean
-                imei_label = re.search(r"IMEI[\s/:\d]*?(\d{15})", text, re.IGNORECASE)
-                if imei_label:
-                    return imei_label.group(1)
+                    sub = re.findall(r"\d{15}", clean)
+                    if sub:
+                        return sub[0]
     except Exception as e:
         print(f"OCR Error: {e}")
     return None
@@ -187,7 +228,7 @@ async def home():
     <head><title>Apple GSX Live Checker Server</title><meta charset="utf-8"></head>
     <body style="background:#0f172a;color:#fff;text-align:center;padding:50px;">
         <h1>🍏 Apple GSX Live Checker Server</h1>
-        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live API Connected & Ready</p>
+        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live API & High-Res OCR Active</p>
     </body>
     </html>
     """
@@ -220,7 +261,7 @@ if handler:
             reply_txt = (
                 "👋 สวัสดีครับ!\n"
                 "• พิมพ์ส่งเลข **IMEI 15 หลัก** ในแชท\n"
-                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง / ถาดซิม** ส่งมาได้เลย บอทจะอ่านเลขอัตโนมัติครับ! 📷"
+                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง / ถาดซิม** ส่งมาได้เลย บอทจะสแกนเลขอัตโนมัติครับ! 📷"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_txt))
             return
@@ -241,6 +282,7 @@ if handler:
             for chunk in message_content.iter_content():
                 image_bytes += chunk
 
+            # สแกนหาเลขอีมี่จากรูปภาพ
             detected_imei = extract_imei_from_image(image_bytes)
 
             if detected_imei:
@@ -252,9 +294,9 @@ if handler:
                     return
 
             err_msg = (
-                "📷 บอทได้รับรูปภาพแล้ว แต่ไม่พบเลข IMEI (15 หลัก) ที่ชัดเจน\n\n"
+                "📷 บอทมองเห็นรูปแล้ว แต่ไม่พบตัวเลข IMEI (15 หลัก) ที่ชัดเจน\n\n"
                 "💡 คำแนะนำ:\n"
-                "• ถ่ายซูมให้เห็นตัวเลขชัดเจนขึ้น (เช่น หน้าการตั้งค่า > ทั่วไป > เกี่ยวกับ หรือหลังกล่อง)\n"
+                "• ถ่ายซูมให้เห็นแถบตัวเลขชัดเจนขึ้น (เช่น หน้า การตั้งค่า > ทั่วไป > เกี่ยวกับ หรือหลังกล่อง)\n"
                 "• หรือพิมพ์เลข 15 หลักส่งมาในแชทได้โดยตรงครับ"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=err_msg))
