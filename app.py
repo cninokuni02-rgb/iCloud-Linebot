@@ -17,12 +17,10 @@ from linebot.models import (
 
 from checkers import ICloudChecker
 
-# โหลดค่าจากไฟล์ .env
 load_dotenv()
 
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "")
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "")
-SICKW_API_KEY = os.getenv("SICKW_API_KEY", "")
 IMEICHECK_API_KEY = os.getenv("IMEICHECK_API_KEY", "")
 
 app = FastAPI(title="iCloud Check LINE Bot API", version="1.0.0")
@@ -47,7 +45,6 @@ async def start_auto_keep_alive():
 def get_checker():
     load_dotenv(override=True)
     return ICloudChecker(
-        sickw_key=os.getenv("SICKW_API_KEY", ""),
         imeicheck_key=os.getenv("IMEICHECK_API_KEY", "")
     )
 
@@ -106,13 +103,13 @@ def build_flex_message(data: dict) -> FlexSendMessage:
         badge_bg = "#E53935"
         badge_text = "FMI: ON (ติดล็อค iCloud) ❌"
         status_color = "#E53935"
-    elif fmi == "REQUIRE_API_KEY":
-        badge_bg = "#FF9800"
-        badge_text = "⚠️ สถานะ FMI: ต้องเชื่อมต่อ Live API"
-        status_color = "#FF9800"
+    elif fmi == "DEVICE_VERIFIED":
+        badge_bg = "#0284C7"
+        badge_text = "เครื่องแท้ผ่านเกณฑ์ GSMA ✅"
+        status_color = "#0284C7"
     else:
         badge_bg = "#FFA000"
-        badge_text = f"FMI: {fmi}"
+        badge_text = f"สถานะ: {fmi}"
         status_color = "#FFA000"
 
     bubble_json = {
@@ -124,7 +121,7 @@ def build_flex_message(data: dict) -> FlexSendMessage:
             "backgroundColor": "#1E1E2F",
             "paddingAll": "16px",
             "contents": [
-                {"type": "text", "text": "📱 iCloud Status Report", "weight": "bold", "color": "#00D2FF", "size": "sm"},
+                {"type": "text", "text": "📱 Apple Device Report", "weight": "bold", "color": "#00D2FF", "size": "sm"},
                 {"type": "text", "text": model, "weight": "bold", "color": "#FFFFFF", "size": "md", "margin": "xs", "wrap": True}
             ]
         },
@@ -169,7 +166,7 @@ def build_flex_message(data: dict) -> FlexSendMessage:
                             "type": "box",
                             "layout": "horizontal",
                             "contents": [
-                                {"type": "text", "text": "iCloud", "size": "xs", "color": "#888888", "flex": 2},
+                                {"type": "text", "text": "สถานะ", "size": "xs", "color": "#888888", "flex": 2},
                                 {"type": "text", "text": icloud_st, "size": "xs", "color": status_color, "weight": "bold", "flex": 5}
                             ]
                         }
@@ -180,20 +177,20 @@ def build_flex_message(data: dict) -> FlexSendMessage:
         "footer": {
             "type": "box",
             "layout": "vertical",
-            "contents": [{"type": "text", "text": f"Checked by {source}", "size": "xxs", "color": "#AAAAAA", "align": "center"}]
+            "contents": [{"type": "text", "text": f"Verified by {source}", "size": "xxs", "color": "#AAAAAA", "align": "center"}]
         }
     }
 
-    return FlexSendMessage(alt_text=f"ผลตรวจ iCloud: {model} ({fmi})", contents=BubbleContainer.new_from_json_dict(bubble_json))
+    return FlexSendMessage(alt_text=f"ผลตรวจอุปกรณ์: {model}", contents=BubbleContainer.new_from_json_dict(bubble_json))
 
 @app.get("/", response_class=HTMLResponse)
 async def home():
     return """
     <!DOCTYPE html>
     <html>
-    <head><title>iCloud Checker Server</title><meta charset="utf-8"></head>
+    <head><title>Apple Device Checker Server</title><meta charset="utf-8"></head>
     <body style="background:#0f172a;color:#fff;text-align:center;padding:50px;">
-        <h1>🍏 iCloud Checker Server</h1>
+        <h1>🍏 Apple Device Checker Server</h1>
         <p style="color:#10b981;font-weight:bold;">⚡ Status: Online & Image OCR Active</p>
     </body>
     </html>
