@@ -40,7 +40,7 @@ async def start_auto_keep_alive():
                     print(f"⚡ Anti-Sleep Ping: Sent to {base_url} (Status: {res.status_code})")
             except Exception as e:
                 print(f"⚡ Anti-Sleep Notice: {e}")
-            await asyncio.sleep(540) # สะกิดตัวเองทุกๆ 9 นาที
+            await asyncio.sleep(540)
 
     asyncio.create_task(ping_loop())
 
@@ -59,39 +59,30 @@ if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 def extract_imei_from_image(image_bytes: bytes) -> Optional[str]:
-    """สแกนอ่านตัวหนังสือจากรูปภาพ (OCR) เพื่อหาเลข IMEI 15 หลัก"""
     try:
         url = "https://api.ocr.space/parse/image"
         payload = {
-            "apikey": "helloworld", # ฟรีคีย์
+            "apikey": "helloworld",
             "OCREngine": "2",
             "isOverlayRequired": False,
             "detectOrientation": True,
             "scale": True
         }
-        files = {
-            "file": ("image.jpg", image_bytes, "image/jpeg")
-        }
+        files = {"file": ("image.jpg", image_bytes, "image/jpeg")}
         res = requests.post(url, data=payload, files=files, timeout=20)
         if res.status_code == 200:
             result = res.json()
             parsed_results = result.get("ParsedResults", [])
             if parsed_results:
                 text = parsed_results[0].get("ParsedText", "")
-                
-                # 1. ค้นหา IMEI 15 หลักติดกัน
                 imeis = re.findall(r"\b\d{15}\b", text)
                 if imeis:
                     return imeis[0]
-                
-                # 2. ค้นหาแบบมีเว้นวรรค เช่น 35 656508 701547 7
                 spaced_matches = re.findall(r"\b\d{2}[\s\-]?\d{6}[\s\-]?\d{6}[\s\-]?\d{1}\b", text)
                 for sm in spaced_matches:
                     clean = re.sub(r"[^\d]", "", sm)
                     if len(clean) == 15:
                         return clean
-                
-                # 3. ค้นหาคำว่า IMEI : XXXXXXXXXXXXXXX
                 imei_label = re.search(r"IMEI[\s/:\d]*?(\d{15})", text, re.IGNORECASE)
                 if imei_label:
                     return imei_label.group(1)
@@ -115,6 +106,10 @@ def build_flex_message(data: dict) -> FlexSendMessage:
         badge_bg = "#E53935"
         badge_text = "FMI: ON (ติดล็อค iCloud) ❌"
         status_color = "#E53935"
+    elif fmi == "REQUIRE_API_KEY":
+        badge_bg = "#FF9800"
+        badge_text = "⚠️ สถานะ FMI: ต้องเชื่อมต่อ Live API"
+        status_color = "#FF9800"
     else:
         badge_bg = "#FFA000"
         badge_text = f"FMI: {fmi}"
@@ -222,7 +217,6 @@ async def line_webhook(request: Request):
     return "OK"
 
 if handler:
-    # 1. ดักจับข้อความตัวอักษร
     @handler.add(MessageEvent, message=TextMessage)
     def handle_line_text_message(event):
         user_msg = event.message.text.strip()
@@ -246,17 +240,14 @@ if handler:
         else:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ ตรวจสอบไม่สำเร็จ"))
 
-    # 2. ดักจับรูปภาพ (Image OCR Auto Detection)
     @handler.add(MessageEvent, message=ImageMessage)
     def handle_line_image_message(event):
         try:
-            # ดึงไฟล์รูปจาก LINE
             message_content = line_bot_api.get_message_content(event.message.id)
             image_bytes = b""
             for chunk in message_content.iter_content():
                 image_bytes += chunk
 
-            # สแกนหาเลข IMEI จากรูป
             detected_imei = extract_imei_from_image(image_bytes)
 
             if detected_imei:
@@ -267,7 +258,6 @@ if handler:
                     line_bot_api.reply_message(event.reply_token, flex_card)
                     return
 
-            # ถ้าสแกนไม่เจอ
             err_msg = (
                 "📷 บอทได้รับรูปภาพแล้ว แต่ไม่พบเลข IMEI (15 หลัก) ที่ชัดเจน\n\n"
                 "💡 คำแนะนำ:\n"

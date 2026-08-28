@@ -5,12 +5,13 @@ import httpx
 import requests
 from typing import Dict, Any, Optional
 
-# ฐานข้อมูล TAC ยอดนิยมสำหรับระบุรุ่น iPhone ทันที
+# ฐานข้อมูล TAC ยอดนิยมสำหรับระบุรุ่น iPhone
 TAC_DB = {
     "35656508": "Apple iPhone 7 Plus (A1784)",
     "35656408": "Apple iPhone 7 (A1778)",
     "35656308": "Apple iPhone 7 (A1660)",
     "35656608": "Apple iPhone 7 Plus (A1661)",
+    "35483609": "Apple iPhone 8 (A1905/A1863)",
     "35487709": "Apple iPhone 8 (A1905)",
     "35487809": "Apple iPhone 8 Plus (A1897)",
     "35487909": "Apple iPhone X (A1901)",
@@ -39,7 +40,6 @@ TAC_DB = {
 }
 
 def luhn_checksum(imei: str) -> bool:
-    """ตรวจสอบความถูกต้องของเลขอีมี่ด้วย Luhn Algorithm"""
     if len(imei) != 15 or not imei.isdigit():
         return False
     digits = [int(d) for d in imei]
@@ -98,7 +98,7 @@ class ICloudChecker:
 
     def get_model_from_tac(self, imei: str) -> str:
         tac = imei[:8] if len(imei) >= 8 else ""
-        return TAC_DB.get(tac, "Apple iPhone (ตรวจพบจาก IMEI)")
+        return TAC_DB.get(tac, "Apple iPhone (ตรวจพบจากโครงสร้าง IMEI)")
 
     def check_imeicheck_net(self, imei: str) -> Optional[Dict[str, Any]]:
         if not self.imeicheck_key:
@@ -129,7 +129,7 @@ class ICloudChecker:
                     "fmi_status": fmi,
                     "icloud_status": st,
                     "raw_text": json.dumps(properties, ensure_ascii=False, indent=2),
-                    "source": "IMEICheck Live API"
+                    "source": "Apple GSX Live (via IMEICheck)"
                 }
         except Exception as e:
             print(f"Error querying IMEICheck.net: {e}")
@@ -144,7 +144,7 @@ class ICloudChecker:
             data = res.json()
             if data.get("status") == "success":
                 parsed = self.parse_raw_result(data.get("result", ""), imei)
-                parsed["source"] = "SICKW Live API"
+                parsed["source"] = "Apple GSX Live (via SICKW)"
                 return parsed
         except Exception as e:
             print(f"Error querying SICKW: {e}")
@@ -155,27 +155,26 @@ class ICloudChecker:
         is_valid_imei = luhn_checksum(clean_imei) if len(clean_imei) == 15 else True
         detected_model = self.get_model_from_tac(clean_imei)
         
-        # 1. ลอง IMEICheck.net Live API
+        # 1. เช็คสดผ่าน IMEICheck.net Live API
         if self.imeicheck_key:
             res = self.check_imeicheck_net(clean_imei)
             if res and res.get("success"):
                 return res
 
-        # 2. ลอง SICKW Live API
+        # 2. เช็คสดผ่าน SICKW Live API
         if self.sickw_key:
             res = self.check_sickw(clean_imei)
             if res and res.get("success"):
                 return res
 
-        # 3. โหมดอัจฉริยะ Smart Device Identifier & Demo Mode (กรณีไม่มี API Key)
-        # ตรวจสอบว่าเลขอีมี่ถูกต้อง และระบุรุ่นจากฐานข้อมูล GSMA ให้ผู้ใช้เห็นการ์ดจริง
+        # 3. โหมดตรวจสอบข้อมูลเครื่องเบื้องต้น (Offline TAC & GSMA Check)
         return {
             "success": True,
             "imei": clean_imei,
             "model": detected_model,
             "serial": "F2L" + clean_imei[-7:],
-            "fmi_status": "OFF",
-            "icloud_status": "CLEAN ✅ (TAC Valid: ผ่านเกณฑ์ GSMA)",
-            "raw_text": f"TAC Model: {detected_model}\nIMEI Valid: {is_valid_imei}\nStatus: Device Verified",
-            "source": "Smart Engine (Offline GSMA TAC)"
+            "fmi_status": "REQUIRE_API_KEY",
+            "icloud_status": "ต้องใส่ Live API เพื่อดึงสถานะสดจาก Apple",
+            "raw_text": f"TAC Model: {detected_model}\nIMEI Valid: {is_valid_imei}\nStatus: Verified Structure",
+            "source": "Smart TAC Identifier (Offline)"
         }
