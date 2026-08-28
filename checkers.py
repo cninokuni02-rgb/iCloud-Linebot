@@ -61,6 +61,19 @@ TAC_DB = {
     "35921414": "Apple iPhone 16 Pro Max (A3296)"
 }
 
+def luhn_checksum(imei: str) -> bool:
+    if len(imei) != 15 or not imei.isdigit():
+        return False
+    digits = [int(d) for d in imei]
+    checksum = 0
+    for i, d in enumerate(digits):
+        if i % 2 == 1:
+            doubled = d * 2
+            checksum += doubled if doubled < 10 else (doubled - 9)
+        else:
+            checksum += d
+    return checksum % 10 == 0
+
 class ICloudChecker:
     def __init__(self, imeicheck_key: Optional[str] = None):
         self.imeicheck_key = imeicheck_key or os.getenv("IMEICHECK_API_KEY", "frJrawm6YcXMJCt3ee438roSW5HVbB5U3wRS8zFj2ec75894")
@@ -73,7 +86,6 @@ class ICloudChecker:
         return "Apple iPhone"
 
     def check_live_gsx(self, imei: str) -> Optional[Dict[str, Any]]:
-        """ยิงดึงข้อมูลสด $0.01 จากฐานข้อมูล Apple GSX ผ่าน IMEICheck Service 18"""
         if not self.imeicheck_key:
             return None
         
@@ -94,7 +106,6 @@ class ICloudChecker:
             if res.status_code in [200, 201] and data.get("status") == "successful":
                 properties = data.get("properties", {})
                 
-                # ตรวจสอบสถานะ FMI จริงจาก Apple
                 fmi_on = properties.get("fmiOn")
                 if fmi_on is True:
                     fmi = "ON"
@@ -129,12 +140,10 @@ class ICloudChecker:
         clean_imei = re.sub(r"[^A-Za-z0-9]", "", imei.strip())
         detected_model = self.get_model_from_tac(clean_imei)
         
-        # 1. ยิงดึงข้อมูลสดจาก Apple GSX ($0.01 Live Service)
         live_res = self.check_live_gsx(clean_imei)
         if live_res and live_res.get("success"):
             return live_res
 
-        # 2. Fallback หากเครดิตหมดหรือไม่สามารถต่อ API ได้
         return {
             "success": True,
             "imei": clean_imei,
