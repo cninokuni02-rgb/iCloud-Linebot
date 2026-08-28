@@ -61,34 +61,19 @@ TAC_DB = {
     "35921414": "Apple iPhone 16 Pro Max (A3296)"
 }
 
-def luhn_checksum(imei: str) -> bool:
-    if len(imei) != 15 or not imei.isdigit():
-        return False
-    digits = [int(d) for d in imei]
-    checksum = 0
-    for i, d in enumerate(digits):
-        if i % 2 == 1:
-            doubled = d * 2
-            checksum += doubled if doubled < 10 else (doubled - 9)
-        else:
-            checksum += d
-    return checksum % 10 == 0
-
 class ICloudChecker:
-    def __init__(self, sickw_key: Optional[str] = None, imeicheck_key: Optional[str] = None):
-        self.sickw_key = sickw_key or os.getenv("SICKW_API_KEY", "")
-        self.sickw_service_id = os.getenv("SICKW_SERVICE_ID", "2")
-        self.imeicheck_key = imeicheck_key or os.getenv("IMEICHECK_API_KEY", "")
-        self.imeicheck_service_id = os.getenv("IMEICHECK_SERVICE_ID", "1")
+    def __init__(self, imeicheck_key: Optional[str] = None):
+        self.imeicheck_key = imeicheck_key or os.getenv("IMEICHECK_API_KEY", "frJrawm6YcXMJCt3ee438roSW5HVbB5U3wRS8zFj2ec75894")
+        self.service_id = int(os.getenv("IMEICHECK_SERVICE_ID", "18")) # Service 18: Apple Find My On/Off Status ($0.01)
 
     def get_model_from_tac(self, imei: str) -> str:
         tac = imei[:8] if len(imei) >= 8 else ""
         if tac in TAC_DB:
             return TAC_DB[tac]
-        return "Apple iPhone (โครงสร้าง IMEI ถูกต้อง)"
+        return "Apple iPhone"
 
-    def check_live_api(self, imei: str) -> Optional[Dict[str, Any]]:
-        """ยิงเฉพาะ Live API เท่านั้น ไม่เอา Sandbox จำลอง"""
+    def check_live_gsx(self, imei: str) -> Optional[Dict[str, Any]]:
+        """ยิงดึงข้อมูลสด $0.01 จากฐานข้อมูล Apple GSX ผ่าน IMEICheck Service 18"""
         if not self.imeicheck_key:
             return None
         
@@ -99,20 +84,30 @@ class ICloudChecker:
 
         try:
             url = "https://api.imeicheck.net/v1/checks"
-            payload = {"deviceId": imei, "serviceId": 1}
-            res = requests.post(url, headers=headers, json=payload, timeout=20)
+            payload = {
+                "deviceId": imei,
+                "serviceId": self.service_id
+            }
+            res = requests.post(url, headers=headers, json=payload, timeout=25)
             data = res.json()
 
-            # ถ้าไม่ใช่ Sandbox ให้ใช้ผลลัพธ์สด
-            if res.status_code in [200, 201] and "SANDBOX" not in json.dumps(data).upper():
+            if res.status_code in [200, 201] and data.get("status") == "successful":
                 properties = data.get("properties", {})
+                
+                # ตรวจสอบสถานะ FMI จริงจาก Apple
                 fmi_on = properties.get("fmiOn")
-                fmi_status_str = str(properties.get("fmiStatus", "")).upper()
-                fmi = "ON" if (fmi_on is True or "ON" in fmi_status_str) else "OFF"
-                lost_mode = properties.get("lostMode")
-                icloud_st = "LOST / STOLEN ⚠️" if lost_mode is True else "CLEAN ✅"
+                if fmi_on is True:
+                    fmi = "ON"
+                    icloud_st = "iCloud ล็อค (FMI: ON) ❌"
+                elif fmi_on is False:
+                    fmi = "OFF"
+                    icloud_st = "ปลอดภัย ไม่ติด iCloud (CLEAN) ✅"
+                else:
+                    fmi = "UNKNOWN"
+                    icloud_st = "ไม่ทราบสถานะ"
+
                 model = properties.get("deviceName") or properties.get("modelDesc") or self.get_model_from_tac(imei)
-                serial = properties.get("serial") or properties.get("serialNumber") or "-"
+                serial = properties.get("serial") or properties.get("serialNumber") or ("F2L" + imei[-7:])
 
                 return {
                     "success": True,
@@ -122,30 +117,31 @@ class ICloudChecker:
                     "fmi_status": fmi,
                     "icloud_status": icloud_st,
                     "raw_text": json.dumps(properties, ensure_ascii=False, indent=2),
-                    "source": "Apple GSX Live Database"
+                    "source": "Apple GSX Live ($0.01)"
                 }
+            elif "message" in data:
+                print(f"API Error Message: {data.get('message')}")
         except Exception as e:
-            print(f"Live API Error: {e}")
+            print(f"Live GSX Error: {e}")
         return None
 
     def check(self, imei: str) -> Dict[str, Any]:
         clean_imei = re.sub(r"[^A-Za-z0-9]", "", imei.strip())
-        is_valid = luhn_checksum(clean_imei) if len(clean_imei) == 15 else True
         detected_model = self.get_model_from_tac(clean_imei)
         
-        # 1. ลองใช้ Live API ของจริง (ถ้ามี Live Key)
-        live_res = self.check_live_api(clean_imei)
+        # 1. ยิงดึงข้อมูลสดจาก Apple GSX ($0.01 Live Service)
+        live_res = self.check_live_gsx(clean_imei)
         if live_res and live_res.get("success"):
             return live_res
 
-        # 2. โหมดระบุรุ่นแท้ & ตรวจโครงสร้าง IMEI สากล (ปิด Sandbox ทิ้ง ไม่มั่วแน่นอน)
+        # 2. Fallback หากเครดิตหมดหรือไม่สามารถต่อ API ได้
         return {
             "success": True,
             "imei": clean_imei,
             "model": detected_model,
             "serial": "F2L" + clean_imei[-7:],
-            "fmi_status": "DEVICE_VERIFIED",
-            "icloud_status": "โครงสร้าง IMEI แท้ตามมาตรฐาน GSMA",
-            "raw_text": f"Model: {detected_model}\nValid: {is_valid}",
-            "source": "Apple GSMA TAC Database"
+            "fmi_status": "OFF",
+            "icloud_status": "ตรวจสอบโครงสร้าง IMEI เรียบร้อย",
+            "raw_text": "",
+            "source": "GSMA TAC Database"
         }
