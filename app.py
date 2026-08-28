@@ -1,7 +1,9 @@
 ﻿import os
 import re
+import asyncio
 from typing import Optional
 from dotenv import load_dotenv
+import httpx
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from linebot import LineBotApi, WebhookHandler
@@ -23,8 +25,28 @@ IMEICHECK_API_KEY = os.getenv("IMEICHECK_API_KEY", "")
 
 app = FastAPI(title="iCloud Check LINE Bot API", version="1.0.0")
 
+# ----------------- ระบบกันหลับอัตโนมัติ (Anti-Sleep Self-Ping) -----------------
+@app.on_event("startup")
+async def start_auto_keep_alive():
+    async def ping_loop():
+        await asyncio.sleep(30) # รอเซิร์ฟเวอร์เปิดเสร็จ 30 วินาที
+        while True:
+            try:
+                # ดึง URL อัตโนมัติจาก Render หรือ fallback
+                base_url = os.getenv("RENDER_EXTERNAL_URL", "https://icloud-linebot.onrender.com")
+                async with httpx.AsyncClient() as client:
+                    res = await client.get(f"{base_url}/", timeout=20)
+                    print(f"⚡ Anti-Sleep Ping: Sent to {base_url} (Status: {res.status_code})")
+            except Exception as e:
+                print(f"⚡ Anti-Sleep Ping Notice: {e}")
+            
+            # ยิงสะกิดตัวเองทุกๆ 9 นาที (540 วินาที) ทำให้เซิร์ฟเวอร์ตื่นตลอด 24 ชม. ไม่ดับแน่นอน
+            await asyncio.sleep(540)
+
+    asyncio.create_task(ping_loop())
+    print("✅ ระบบป้องกันเซิร์ฟเวอร์หลับ (Anti-Sleep Engine) เปิดทำงานแล้ว!")
+
 def get_checker():
-    # โหลดค่า env ใหม่ทุกครั้งที่มีการเรียกใช้ เผื่อผู้ใช้เพิ่งอัปเดตไฟล์ .env
     load_dotenv(override=True)
     return ICloudChecker(
         sickw_key=os.getenv("SICKW_API_KEY", ""),
@@ -48,7 +70,6 @@ def build_flex_message(data: dict) -> FlexSendMessage:
     icloud_st = data.get("icloud_status", "-")
     source = data.get("source", "Checker")
 
-    # กำหนดสีและไอคอนตามสถานะ
     if fmi == "OFF":
         badge_bg = "#00B900" # สีเขียว
         badge_text = "FMI: OFF (ปลอดภัย ไม่ติด iCloud) ✅"
@@ -169,6 +190,31 @@ def build_flex_message(data: dict) -> FlexSendMessage:
         contents=BubbleContainer.new_from_json_dict(bubble_json)
     )
 
+@app.get("/", response_class=HTMLResponse)
+async def home():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>iCloud Checker Server</title>
+        <meta charset="utf-8">
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0f172a; color: #fff; text-align: center; padding: 50px 20px; }
+            .card { background: #1e293b; max-width: 600px; margin: 0 auto; padding: 30px; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+            h1 { color: #38bdf8; }
+            .badge { display: inline-block; padding: 6px 16px; border-radius: 12px; font-size: 14px; background: #10b981; font-weight: bold; }
+        </style>
+    </head>
+    <body>
+        <div class="card">
+            <h1>🍏 iCloud Checker Server</h1>
+            <p><span class="badge">⚡ Status: Online & Anti-Sleep Active</span></p>
+            <p>ระบบ Webhook ออนไลน์ตลอด 24 ชั่วโมง</p>
+        </div>
+    </body>
+    </html>
+    """
+
 @app.get("/api/check")
 async def check_api(imei: str = Query(..., description="IMEI 15 หลัก หรือ Serial Number")):
     checker = get_checker()
@@ -196,7 +242,6 @@ if handler:
     def handle_line_message(event):
         user_msg = event.message.text.strip()
         
-        # ตรวจสอบรูปแบบ IMEI หรือ Serial Number
         is_imei = bool(re.match(r"^\d{15}$", user_msg))
         is_sn = bool(re.match(r"^[A-Za-z0-9]{8,12}$", user_msg))
 
@@ -208,7 +253,6 @@ if handler:
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_txt))
             return
 
-        # ตรวจสอบสถานะ
         checker = get_checker()
         res = checker.check(user_msg)
 
