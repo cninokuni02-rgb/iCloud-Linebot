@@ -130,7 +130,6 @@ def build_flex_message(data: dict) -> FlexSendMessage:
     serial = data.get("serial", "-")
     fmi = data.get("fmi_status", "UNKNOWN")
     icloud_st = data.get("icloud_status", "-")
-    source = data.get("source", "Apple GSX Live")
 
     if fmi == "OFF":
         badge_bg = "#00B900"
@@ -210,7 +209,7 @@ def build_flex_message(data: dict) -> FlexSendMessage:
         "footer": {
             "type": "box",
             "layout": "vertical",
-            "contents": [{"type": "text", "text": f"Live Data from {source}", "size": "xxs", "color": "#AAAAAA", "align": "center"}]
+            "contents": [{"type": "text", "text": "By บักวันซัย", "size": "xs", "color": "#888888", "weight": "bold", "align": "center"}]
         }
     }
 
@@ -224,7 +223,7 @@ async def home():
     <head><title>Apple GSX Live Checker Server</title><meta charset="utf-8"></head>
     <body style="background:#0f172a;color:#fff;text-align:center;padding:50px;">
         <h1>🍏 Apple GSX Live Checker Server</h1>
-        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live GSX ($0.01) + Dual IMEI/Serial OCR Active</p>
+        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live GSX ($0.01) + By บักวันซัย Active</p>
     </body>
     </html>
     """
