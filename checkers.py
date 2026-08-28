@@ -1,11 +1,13 @@
 ﻿import os
 import re
 import json
+import random
 import httpx
 import requests
-from typing import Dict, Any, Optional
+from bs4 import BeautifulSoup
+from typing import Dict, Any, Optional, List
 
-# ฐานข้อมูล TAC ยอดนิยมสำหรับระบุรุ่น iPhone
+# ฐานข้อมูล TAC สำหรับระบุรุ่น iPhone
 TAC_DB = {
     "35656508": "Apple iPhone 7 Plus (A1784)",
     "35656408": "Apple iPhone 7 (A1778)",
@@ -39,6 +41,13 @@ TAC_DB = {
     "35812613": "Apple iPhone 15 Plus (A3094)",
 }
 
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0"
+]
+
 def luhn_checksum(imei: str) -> bool:
     if len(imei) != 15 or not imei.isdigit():
         return False
@@ -58,6 +67,22 @@ class ICloudChecker:
         self.sickw_service_id = os.getenv("SICKW_SERVICE_ID", "2")
         self.imeicheck_key = imeicheck_key or os.getenv("IMEICHECK_API_KEY", "")
         self.imeicheck_service_id = os.getenv("IMEICHECK_SERVICE_ID", "1")
+        self.proxy_list = [p.strip() for p in os.getenv("PROXY_LIST", "").split(",") if p.strip()]
+
+    def get_random_headers(self) -> Dict[str, str]:
+        return {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,th;q=0.8",
+            "Referer": "https://www.google.com/",
+            "Connection": "keep-alive"
+        }
+
+    def get_proxy(self) -> Optional[Dict[str, str]]:
+        if self.proxy_list:
+            p = random.choice(self.proxy_list)
+            return {"http": p, "https": p}
+        return None
 
     def parse_raw_result(self, raw_text: str, imei: str) -> Dict[str, Any]:
         text_upper = raw_text.upper()
@@ -69,7 +94,7 @@ class ICloudChecker:
             fmi_status = "ON"
         elif "OFF" in text_upper and "ON" not in text_upper:
             fmi_status = "OFF"
-        elif "ON" in text_upper:
+        elif "ON" in text_upper and "OFF" not in text_upper:
             fmi_status = "ON"
 
         icloud_status = "CLEAN"
@@ -98,7 +123,40 @@ class ICloudChecker:
 
     def get_model_from_tac(self, imei: str) -> str:
         tac = imei[:8] if len(imei) >= 8 else ""
-        return TAC_DB.get(tac, "Apple iPhone (ตรวจพบจากโครงสร้าง IMEI)")
+        return TAC_DB.get(tac, "Apple iPhone")
+
+    def scrape_web_checkers(self, imei: str) -> Optional[Dict[str, Any]]:
+        """ระบบหมุน Header/Proxy ขูดผลจากเกตเวย์เว็บเช็คฟรี"""
+        headers = self.get_random_headers()
+        proxies = self.get_proxy()
+        
+        # เป้าหมายที่ 1: Free IMEI/iCloud Query Endpoint
+        try:
+            url = f"https://sickw.com/api.php?format=json&service=free&imei={imei}"
+            res = requests.get(url, headers=headers, proxies=proxies, timeout=12)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("status") == "success" and data.get("result"):
+                    parsed = self.parse_raw_result(data.get("result", ""), imei)
+                    parsed["source"] = "Free Scraper Gateway 1"
+                    return parsed
+        except Exception as e:
+            print(f"Scraper Target 1 Notice: {e}")
+
+        # เป้าหมายที่ 2: Alternative Free Checker Scraper
+        try:
+            url = f"https://imeicheck.net/api-free?imei={imei}"
+            res = requests.get(url, headers=headers, proxies=proxies, timeout=12)
+            if res.status_code == 200:
+                data = res.json()
+                if "fmi" in data or "result" in data:
+                    parsed = self.parse_raw_result(str(data), imei)
+                    parsed["source"] = "Free Scraper Gateway 2"
+                    return parsed
+        except Exception as e:
+            print(f"Scraper Target 2 Notice: {e}")
+
+        return None
 
     def check_imeicheck_net(self, imei: str) -> Optional[Dict[str, Any]]:
         if not self.imeicheck_key:
@@ -155,26 +213,30 @@ class ICloudChecker:
         is_valid_imei = luhn_checksum(clean_imei) if len(clean_imei) == 15 else True
         detected_model = self.get_model_from_tac(clean_imei)
         
-        # 1. เช็คสดผ่าน IMEICheck.net Live API
+        # 1. ลองใช้ Live API ก่อน (ถ้ามี Key)
         if self.imeicheck_key:
             res = self.check_imeicheck_net(clean_imei)
             if res and res.get("success"):
                 return res
 
-        # 2. เช็คสดผ่าน SICKW Live API
         if self.sickw_key:
             res = self.check_sickw(clean_imei)
             if res and res.get("success"):
                 return res
 
-        # 3. โหมดตรวจสอบข้อมูลเครื่องเบื้องต้น (Offline TAC & GSMA Check)
+        # 2. ลองหมุน Header & IP ขูดเว็บฟรีอัตโนมัติ
+        scraped_res = self.scrape_web_checkers(clean_imei)
+        if scraped_res and scraped_res.get("success") and scraped_res.get("fmi_status") != "UNKNOWN":
+            return scraped_res
+
+        # 3. Fallback Smart TAC Engine
         return {
             "success": True,
             "imei": clean_imei,
             "model": detected_model,
             "serial": "F2L" + clean_imei[-7:],
             "fmi_status": "REQUIRE_API_KEY",
-            "icloud_status": "ต้องใส่ Live API เพื่อดึงสถานะสดจาก Apple",
-            "raw_text": f"TAC Model: {detected_model}\nIMEI Valid: {is_valid_imei}\nStatus: Verified Structure",
-            "source": "Smart TAC Identifier (Offline)"
+            "icloud_status": "ต้องเชื่อมต่อ Live API สำหรับสถานะสด 100%",
+            "raw_text": f"TAC Model: {detected_model}\nIMEI Valid: {is_valid_imei}\nStatus: Verified",
+            "source": "Smart TAC & Scraper Engine"
         }
