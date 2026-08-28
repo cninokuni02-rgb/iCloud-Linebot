@@ -57,75 +57,74 @@ if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 def optimize_image_for_ocr(image_bytes: bytes) -> bytes:
-    """บีบอัดและปรับภาพให้คมชัดเพื่อให้อ่านตัวหนังสือและตัวเลขได้แม่นยำ 100%"""
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
-        # ปรับขนาดไม่ให้เกิน 1500px เพื่อให้ไม่ติดขีดจำกัดขนาดไฟล์ของ OCR
-        img.thumbnail((1500, 1500), Image.Resampling.LANCZOS)
-        
-        # เพิ่มความคมชัดของตัวอักษร
+        img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(1.4)
         
         output = io.BytesIO()
-        img.save(output, format='JPEG', quality=85, optimize=True)
+        img.save(output, format='JPEG', quality=90, optimize=True)
         return output.getvalue()
     except Exception as e:
         print(f"Image Optimize Error: {e}")
         return image_bytes
 
 def extract_imei_from_image(image_bytes: bytes) -> Optional[str]:
-    """สแกนอ่านตัวหนังสือและตัวเลขอีมี่จากรูปภาพด้วย AI OCR Engine"""
-    try:
-        opt_bytes = optimize_image_for_ocr(image_bytes)
-        
-        url = "https://api.ocr.space/parse/image"
-        payload = {
-            "apikey": "helloworld",
-            "OCREngine": "2",
-            "isOverlayRequired": False,
-            "detectOrientation": True,
-            "scale": True,
-            "isTable": True
-        }
-        files = {"file": ("image.jpg", opt_bytes, "image/jpeg")}
-        res = requests.post(url, data=payload, files=files, timeout=25)
-        
-        if res.status_code == 200:
-            result = res.json()
-            parsed_results = result.get("ParsedResults", [])
-            if parsed_results:
-                raw_text = parsed_results[0].get("ParsedText", "")
-                
-                # 1. ค้นหาเลข 15 หลักติดกัน
-                direct_matches = re.findall(r"\b\d{15}\b", raw_text)
-                for m in direct_matches:
-                    return m
-                
-                # 2. ค้นหาแบบมีเว้นวรรค (เช่น 35 483609 260074 0)
-                for line in raw_text.splitlines():
-                    clean_digits = re.sub(r"[^\d]", "", line)
-                    if len(clean_digits) == 15:
-                        return clean_digits
-                    # ถ้ามี 15 หลักซ่อนอยู่ในบรรทัด
-                    sub_matches = re.findall(r"\d{15}", clean_digits)
-                    if sub_matches:
-                        return sub_matches[0]
-                
-                # 3. ค้นหาตามหัวข้อ IMEI / MEID / SN
-                imei_labels = re.findall(r"(?:IMEI|MEID|SN|Serial)[\s/:\d]*?([\d\s\-]{15,25})", raw_text, re.IGNORECASE)
-                for label_match in imei_labels:
-                    clean = re.sub(r"[^\d]", "", label_match)
-                    if len(clean) == 15:
-                        return clean
-                    sub = re.findall(r"\d{15}", clean)
-                    if sub:
-                        return sub[0]
-    except Exception as e:
-        print(f"OCR Error: {e}")
+    """สแกนอ่านตัวหนังสือและตัวเลขอีมี่จากรูปภาพด้วย Multi-Engine AI OCR"""
+    opt_bytes = optimize_image_for_ocr(image_bytes)
+    
+    # รันทั้ง Engine 2 (AI Vision) และ Engine 1 (Document OCR)
+    for engine in ["2", "1"]:
+        try:
+            url = "https://api.ocr.space/parse/image"
+            payload = {
+                "apikey": "helloworld",
+                "OCREngine": engine,
+                "isOverlayRequired": False,
+                "detectOrientation": True,
+                "scale": True,
+                "isTable": True
+            }
+            files = {"file": ("image.jpg", opt_bytes, "image/jpeg")}
+            res = requests.post(url, data=payload, files=files, timeout=25)
+            
+            if res.status_code == 200:
+                result = res.json()
+                parsed_results = result.get("ParsedResults", [])
+                if parsed_results:
+                    raw_text = parsed_results[0].get("ParsedText", "")
+                    
+                    # 1. ค้นหาเลข 15 หลักตรงๆ
+                    direct_matches = re.findall(r"\b\d{15}\b", raw_text)
+                    for m in direct_matches:
+                        return m
+                    
+                    # 2. ค้นหาแบบมีเว้นวรรค
+                    for line in raw_text.splitlines():
+                        clean_digits = re.sub(r"[^\d]", "", line)
+                        if len(clean_digits) == 15:
+                            return clean_digits
+                        sub_matches = re.findall(r"\d{15}", clean_digits)
+                        if sub_matches:
+                            return sub_matches[0]
+                    
+                    # 3. ค้นหาตามหัวข้อและแก้ตัวอักษรที่ OCR มักอ่านผิด (O->0, I->1, S->5, B->8)
+                    for line in raw_text.splitlines():
+                        if any(k in line.upper() for k in ["IMEI", "MEID", "SERIAL", "SN", "เกี่ยวกับ"]):
+                            fixed = line.upper().replace('O', '0').replace('I', '1').replace('L', '1').replace('S', '5').replace('B', '8')
+                            digits = re.sub(r"[^\d]", "", fixed)
+                            if len(digits) == 15:
+                                return digits
+                            sub = re.findall(r"\d{15}", digits)
+                            if sub:
+                                return sub[0]
+        except Exception as e:
+            print(f"OCR Engine {engine} Error: {e}")
+            
     return None
 
 def build_flex_message(data: dict) -> FlexSendMessage:
@@ -228,7 +227,7 @@ async def home():
     <head><title>Apple GSX Live Checker Server</title><meta charset="utf-8"></head>
     <body style="background:#0f172a;color:#fff;text-align:center;padding:50px;">
         <h1>🍏 Apple GSX Live Checker Server</h1>
-        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live API & High-Res OCR Active</p>
+        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live API & Enhanced Multi-Engine OCR Active</p>
     </body>
     </html>
     """
@@ -261,7 +260,7 @@ if handler:
             reply_txt = (
                 "👋 สวัสดีครับ!\n"
                 "• พิมพ์ส่งเลข **IMEI 15 หลัก** ในแชท\n"
-                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง / ถาดซิม** ส่งมาได้เลย บอทจะสแกนเลขอัตโนมัติครับ! 📷"
+                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง / ถาดซิม** ส่งมาได้เลย บอทจะอ่านเลขอัตโนมัติครับ! 📷"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_txt))
             return
