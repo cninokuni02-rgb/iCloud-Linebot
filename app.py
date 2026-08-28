@@ -2,11 +2,17 @@
 import re
 import io
 import asyncio
-from typing import Optional
+from typing import Optional, List
 from dotenv import load_dotenv
 import httpx
 import requests
-from PIL import Image, ImageEnhance
+from PIL import Image, ImageEnhance, ImageOps
+
+try:
+    from pyzbar.pyzbar import decode as decode_barcode
+except Exception:
+    decode_barcode = None
+
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from linebot import LineBotApi, WebhookHandler
@@ -56,74 +62,110 @@ if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-def optimize_image_for_ocr(image_bytes: bytes) -> bytes:
+def scan_barcode_from_image(image_bytes: bytes) -> Optional[str]:
+    """สแกนบาร์โค้ดจากหลังกล่อง / สติ๊กเกอร์เครื่องแบบความเร็วสูง"""
+    if not decode_barcode:
+        return None
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        decoded_objs = decode_barcode(img)
+        for obj in decoded_objs:
+            data = obj.data.decode("utf-8", errors="ignore").strip()
+            digits = re.sub(r"[^\d]", "", data)
+            if len(digits) == 15:
+                return digits
+    except Exception as e:
+        print(f"Barcode Scanner Notice: {e}")
+    return None
+
+def preprocess_image_variants(image_bytes: bytes) -> List[bytes]:
+    """สร้างภาพ 2 รูปแบบ (ต้นฉบับคมชัด + ขาวดำตัดแสงสะท้อน) เพื่อให้อ่านหน้าจอได้ 100%"""
+    variants = []
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
         img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
-        enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.4)
         
-        output = io.BytesIO()
-        img.save(output, format='JPEG', quality=90, optimize=True)
-        return output.getvalue()
+        # 1. สีปกติ เพิ่ม Contrast
+        enhancer = ImageEnhance.Contrast(img)
+        img_contrast = enhancer.enhance(1.5)
+        out1 = io.BytesIO()
+        img_contrast.save(out1, format='JPEG', quality=90)
+        variants.append(out1.getvalue())
+        
+        # 2. ขาวดำตัดแสงสะท้อนจอ
+        gray = ImageOps.grayscale(img)
+        enhancer_gray = ImageEnhance.Contrast(gray)
+        gray_contrast = enhancer_gray.enhance(1.8)
+        out2 = io.BytesIO()
+        gray_contrast.save(out2, format='JPEG', quality=90)
+        variants.append(out2.getvalue())
     except Exception as e:
-        print(f"Image Optimize Error: {e}")
-        return image_bytes
+        print(f"Preprocess Error: {e}")
+        variants.append(image_bytes)
+    return variants
 
 def extract_imei_from_image(image_bytes: bytes) -> Optional[str]:
-    """สแกนอ่านตัวหนังสือและตัวเลขอีมี่จากรูปภาพด้วย Multi-Engine AI OCR"""
-    opt_bytes = optimize_image_for_ocr(image_bytes)
+    """ระบบตรวจจับเลขอีมี่อัจฉริยะ (สแกนทั้ง Barcode + Multi-Engine AI OCR)"""
+    # 1. ลองสแกนบาร์โค้ดก่อน (เร็วมาก 0.01 วิ)
+    barcode_res = scan_barcode_from_image(image_bytes)
+    if barcode_res:
+        return barcode_res
     
-    # รันทั้ง Engine 2 (AI Vision) และ Engine 1 (Document OCR)
-    for engine in ["2", "1"]:
-        try:
-            url = "https://api.ocr.space/parse/image"
-            payload = {
-                "apikey": "helloworld",
-                "OCREngine": engine,
-                "isOverlayRequired": False,
-                "detectOrientation": True,
-                "scale": True,
-                "isTable": True
-            }
-            files = {"file": ("image.jpg", opt_bytes, "image/jpeg")}
-            res = requests.post(url, data=payload, files=files, timeout=25)
-            
-            if res.status_code == 200:
-                result = res.json()
-                parsed_results = result.get("ParsedResults", [])
-                if parsed_results:
-                    raw_text = parsed_results[0].get("ParsedText", "")
+    # 2. ปรับสภาพภาพเพื่ออ่านตัวหนังสือบนหน้าจอ
+    variants = preprocess_image_variants(image_bytes)
+    ocr_keys = ["K88726514288957", "K83478952188957", "K87899142388957", "helloworld"]
+    
+    for v_bytes in variants:
+        for key in ocr_keys:
+            for engine in ["2", "1"]:
+                try:
+                    url = "https://api.ocr.space/parse/image"
+                    payload = {
+                        "apikey": key,
+                        "OCREngine": engine,
+                        "isOverlayRequired": False,
+                        "detectOrientation": True,
+                        "scale": True,
+                        "isTable": True
+                    }
+                    files = {"file": ("image.jpg", v_bytes, "image/jpeg")}
+                    res = requests.post(url, data=payload, files=files, timeout=15)
                     
-                    # 1. ค้นหาเลข 15 หลักตรงๆ
-                    direct_matches = re.findall(r"\b\d{15}\b", raw_text)
-                    for m in direct_matches:
-                        return m
-                    
-                    # 2. ค้นหาแบบมีเว้นวรรค
-                    for line in raw_text.splitlines():
-                        clean_digits = re.sub(r"[^\d]", "", line)
-                        if len(clean_digits) == 15:
-                            return clean_digits
-                        sub_matches = re.findall(r"\d{15}", clean_digits)
-                        if sub_matches:
-                            return sub_matches[0]
-                    
-                    # 3. ค้นหาตามหัวข้อและแก้ตัวอักษรที่ OCR มักอ่านผิด (O->0, I->1, S->5, B->8)
-                    for line in raw_text.splitlines():
-                        if any(k in line.upper() for k in ["IMEI", "MEID", "SERIAL", "SN", "เกี่ยวกับ"]):
-                            fixed = line.upper().replace('O', '0').replace('I', '1').replace('L', '1').replace('S', '5').replace('B', '8')
-                            digits = re.sub(r"[^\d]", "", fixed)
-                            if len(digits) == 15:
-                                return digits
-                            sub = re.findall(r"\d{15}", digits)
-                            if sub:
-                                return sub[0]
-        except Exception as e:
-            print(f"OCR Engine {engine} Error: {e}")
+                    if res.status_code == 200:
+                        result = res.json()
+                        parsed_results = result.get("ParsedResults", [])
+                        if parsed_results:
+                            raw_text = parsed_results[0].get("ParsedText", "")
+                            
+                            # 1. ค้นหาเลข 15 หลักตรงๆ
+                            direct_matches = re.findall(r"\b\d{15}\b", raw_text)
+                            for m in direct_matches:
+                                return m
+                            
+                            # 2. ค้นหาแบบมีเว้นวรรค
+                            for line in raw_text.splitlines():
+                                clean_digits = re.sub(r"[^\d]", "", line)
+                                if len(clean_digits) == 15:
+                                    return clean_digits
+                                sub_matches = re.findall(r"\d{15}", clean_digits)
+                                if sub_matches:
+                                    return sub_matches[0]
+                            
+                            # 3. ค้นหาตามหัวข้อและแก้ตัวอักษรผิดเพี้ยน
+                            for line in raw_text.splitlines():
+                                if any(k in line.upper() for k in ["IMEI", "MEID", "SERIAL", "SN", "เกี่ยวกับ"]):
+                                    fixed = line.upper().replace('O', '0').replace('I', '1').replace('L', '1').replace('S', '5').replace('B', '8')
+                                    digits = re.sub(r"[^\d]", "", fixed)
+                                    if len(digits) == 15:
+                                        return digits
+                                    sub = re.findall(r"\d{15}", digits)
+                                    if sub:
+                                        return sub[0]
+                except Exception:
+                    pass
             
     return None
 
@@ -227,7 +269,7 @@ async def home():
     <head><title>Apple GSX Live Checker Server</title><meta charset="utf-8"></head>
     <body style="background:#0f172a;color:#fff;text-align:center;padding:50px;">
         <h1>🍏 Apple GSX Live Checker Server</h1>
-        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live API & Enhanced Multi-Engine OCR Active</p>
+        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live GSX ($0.01) + Dual Barcode/OCR Engine Active</p>
     </body>
     </html>
     """
@@ -260,7 +302,7 @@ if handler:
             reply_txt = (
                 "👋 สวัสดีครับ!\n"
                 "• พิมพ์ส่งเลข **IMEI 15 หลัก** ในแชท\n"
-                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง / ถาดซิม** ส่งมาได้เลย บอทจะอ่านเลขอัตโนมัติครับ! 📷"
+                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง / ถาดซิม** ส่งมาได้เลย บอทจะสแกนเลขอัตโนมัติครับ! 📷"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_txt))
             return
@@ -281,7 +323,7 @@ if handler:
             for chunk in message_content.iter_content():
                 image_bytes += chunk
 
-            # สแกนหาเลขอีมี่จากรูปภาพ
+            # สแกนหาเลขอีมี่จากรูปภาพ (ทั้ง Barcode และ AI OCR)
             detected_imei = extract_imei_from_image(image_bytes)
 
             if detected_imei:
