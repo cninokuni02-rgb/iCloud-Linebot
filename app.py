@@ -2,7 +2,7 @@
 import re
 import io
 import asyncio
-from typing import Optional
+from typing import Optional, Tuple
 from dotenv import load_dotenv
 import httpx
 import requests
@@ -57,23 +57,21 @@ if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-def fast_extract_imei_from_image(image_bytes: bytes) -> Optional[str]:
-    """สแกนอ่านตัวเลข IMEI จากรูปภาพด้วย AI Vision ความเร็วสูง"""
+def fast_extract_device_info_from_image(image_bytes: bytes) -> Tuple[Optional[str], Optional[str]]:
+    """สแกนอ่านทั้ง IMEI (15 หลัก) และ เลขประจำเครื่อง/Serial Number (10-12 หลัก) จากรูปภาพอย่างแม่นยำ"""
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
-        # ปรับขนาดให้พอดี (1000px) เพื่อให้อัปโหลดและประมวลผลเร็วที่สุด
-        img.thumbnail((1000, 1000), Image.Resampling.LANCZOS)
+        img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
         enhancer = ImageEnhance.Contrast(img)
         img = enhancer.enhance(1.4)
         
         out = io.BytesIO()
-        img.save(out, format='JPEG', quality=80, optimize=True)
+        img.save(out, format='JPEG', quality=85, optimize=True)
         opt_bytes = out.getvalue()
         
-        # ส่งไปที่ OCR Engine 2
         url = "https://api.ocr.space/parse/image"
         payload = {
             "apikey": "K88726514288957",
@@ -83,7 +81,7 @@ def fast_extract_imei_from_image(image_bytes: bytes) -> Optional[str]:
             "isTable": True
         }
         files = {"file": ("image.jpg", opt_bytes, "image/jpeg")}
-        res = requests.post(url, data=payload, files=files, timeout=10)
+        res = requests.post(url, data=payload, files=files, timeout=12)
         
         if res.status_code == 200:
             data = res.json()
@@ -91,39 +89,40 @@ def fast_extract_imei_from_image(image_bytes: bytes) -> Optional[str]:
             if parsed:
                 raw_text = parsed[0].get("ParsedText", "")
                 
-                # 1. หาเลข 15 หลักติดกัน
-                direct = re.findall(r"\b\d{15}\b", raw_text)
-                if direct:
-                    return direct[0]
+                # 1. แปลงฟอนต์ตัวเลขพิเศษของ Apple (เช่น เลข 0 มีขีดฆ่า Ø)
+                normalized = raw_text.replace('Ø', '0').replace('ø', '0').replace('–', '-').replace('—', '-')
                 
-                # 2. หาตามแต่ละบรรทัด (ตัดเว้นวรรค)
-                for line in raw_text.splitlines():
+                # 2. ค้นหาเลขโมเดลที่แสดงบนจอ เช่น "iPhone 7 Plus"
+                detected_model = None
+                model_match = re.search(r"iPhone\s+[0-9A-Za-z\s\+]+", normalized, re.IGNORECASE)
+                if model_match:
+                    detected_model = "Apple " + model_match.group(0).strip().split('\n')[0].split('\t')[0]
+
+                # 3. ค้นหา IMEI (15 หลัก)
+                direct_imei = re.findall(r"\b\d{15}\b", normalized)
+                if direct_imei:
+                    return direct_imei[0], detected_model
+                
+                for line in normalized.splitlines():
                     digits = re.sub(r"[^\d]", "", line)
                     if len(digits) == 15:
-                        return digits
-                    sub = re.findall(r"\d{15}", digits)
-                    if sub:
-                        return sub[0]
+                        return digits, detected_model
                 
-                # 3. แก้ตัวอักษรที่มักอ่านผิดในบรรทัด IMEI
-                for line in raw_text.splitlines():
-                    if any(k in line.upper() for k in ["IMEI", "MEID", "SERIAL", "เกี่ยวกับ", "ABOUT"]):
-                        fixed = line.upper().replace('O', '0').replace('I', '1').replace('L', '1').replace('S', '5').replace('B', '8')
-                        digits = re.sub(r"[^\d]", "", fixed)
-                        if len(digits) == 15:
-                            return digits
-                        sub = re.findall(r"\d{15}", digits)
-                        if sub:
-                            return sub[0]
+                # 4. ค้นหาเลขประจำเครื่อง / Serial Number ของ Apple (10-12 หลัก เช่น FCDZW0R3HG07)
+                sn_candidates = re.findall(r"\b([A-HJ-NP-Z0-9]{10,12})\b", normalized)
+                for sn in sn_candidates:
+                    if any(c.isdigit() for c in sn) and any(c.isalpha() for c in sn):
+                        if not any(k in sn for k in ["MNQQ2", "IPHONE", "PLUS", "IOS", "ABOUT", "MODEL", "HTTP"]):
+                            return sn, detected_model
                             
-                # 4. รวมตัวเลขทั้งหมด
-                all_digits = re.sub(r"[^\d]", "", raw_text)
+                # 5. รวมตัวเลขทั้งหมดในกรณีที่เลขถูกตัด
+                all_digits = re.sub(r"[^\d]", "", normalized)
                 sub = re.findall(r"\d{15}", all_digits)
                 if sub:
-                    return sub[0]
+                    return sub[0], detected_model
     except Exception as e:
-        print(f"Fast OCR Error: {e}")
-    return None
+        print(f"Device Info OCR Error: {e}")
+    return None, None
 
 def build_flex_message(data: dict) -> FlexSendMessage:
     imei = data.get("imei", "-")
@@ -225,7 +224,7 @@ async def home():
     <head><title>Apple GSX Live Checker Server</title><meta charset="utf-8"></head>
     <body style="background:#0f172a;color:#fff;text-align:center;padding:50px;">
         <h1>🍏 Apple GSX Live Checker Server</h1>
-        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live GSX ($0.01) + Fast AI OCR Active</p>
+        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live GSX ($0.01) + Dual IMEI/Serial OCR Active</p>
     </body>
     </html>
     """
@@ -257,8 +256,8 @@ if handler:
         if not (is_imei or is_sn):
             reply_txt = (
                 "👋 สวัสดีครับ!\n"
-                "• พิมพ์ส่งเลข **IMEI 15 หลัก** ในแชท\n"
-                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง / ถาดซิม** ส่งมาได้เลย บอทจะสแกนเลขอัตโนมัติครับ! 📷"
+                "• พิมพ์ส่งเลข **IMEI 15 หลัก** หรือ **Serial Number** ในแชท\n"
+                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง** ส่งมาได้เลย บอทจะอ่านเลขอัตโนมัติครับ! 📷"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_txt))
             return
@@ -279,22 +278,24 @@ if handler:
             for chunk in message_content.iter_content():
                 image_bytes += chunk
 
-            # สแกนหาเลขอีมี่จากรูปภาพด้วย Fast AI OCR
-            detected_imei = fast_extract_imei_from_image(image_bytes)
+            # สแกนหาทั้ง IMEI และ Serial Number
+            detected_id, detected_model = fast_extract_device_info_from_image(image_bytes)
 
-            if detected_imei:
+            if detected_id:
                 checker = get_checker()
-                res = checker.check(detected_imei)
+                res = checker.check(detected_id)
                 if res.get("success"):
+                    if detected_model and res.get("model") in ["Apple Device", "Apple iPhone", ""]:
+                        res["model"] = detected_model
                     flex_card = build_flex_message(res)
                     line_bot_api.reply_message(event.reply_token, flex_card)
                     return
 
             err_msg = (
-                "📷 บอทมองเห็นรูปแล้ว แต่ไม่พบตัวเลข IMEI (15 หลัก) ที่ชัดเจน\n\n"
+                "📷 บอทมองเห็นรูปแล้ว แต่ไม่พบเลข IMEI (15 หลัก) หรือเลขประจำเครื่อง (Serial Number)\n\n"
                 "💡 คำแนะนำ:\n"
-                "• ถ่ายซูมให้เห็นแถบตัวเลขชัดเจนขึ้น (เช่น หน้า การตั้งค่า > ทั่วไป > เกี่ยวกับ หรือหลังกล่อง)\n"
-                "• หรือพิมพ์เลข 15 หลักส่งมาในแชทได้โดยตรงครับ"
+                "• ถ่ายให้เห็นแถบ **เลขประจำเครื่อง** หรือเลื่อนลงมาให้เห็นแถบ **IMEI** ชัดเจน\n"
+                "• หรือพิมพ์ส่งเลขอีมี่ในแชทได้โดยตรงครับ"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=err_msg))
         except Exception as e:

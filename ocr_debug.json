@@ -1,0 +1,202 @@
+{
+  "ParsedResults": [
+    {
+      "TextOverlay": {
+        "Lines": [
+          {
+            "LineText": "Lisas",
+            "Words": [
+              {
+                "WordText": "Lisas",
+                "Left": 0,
+                "Top": 128,
+                "Height": 18,
+                "Width": 54
+              }
+            ],
+            "MaxHeight": 18,
+            "MinTop": 128
+          },
+          {
+            "LineText": "16:19",
+            "Words": [
+              {
+                "WordText": "16",
+                "Left": 252,
+                "Top": 134,
+                "Height": 16,
+                "Width": 48
+              },
+              {
+                "WordText": ":",
+                "Left": 252,
+                "Top": 134,
+                "Height": 16,
+                "Width": 48
+              },
+              {
+                "WordText": "19",
+                "Left": 252,
+                "Top": 134,
+                "Height": 16,
+                "Width": 48
+              }
+            ],
+            "MaxHeight": 16,
+            "MinTop": 134
+          },
+          {
+            "LineText": "34%",
+            "Words": [
+              {
+                "WordText": "34",
+                "Left": 462,
+                "Top": 134,
+                "Height": 17,
+                "Width": 44
+              },
+              {
+                "WordText": "%",
+                "Left": 462,
+                "Top": 134,
+                "Height": 17,
+                "Width": 44
+              }
+            ],
+            "MaxHeight": 17,
+            "MinTop": 134
+          },
+          {
+            "LineText": "iPhone >",
+            "Words": [
+              {
+                "WordText": "iPhone",
+                "Left": 398,
+                "Top": 270,
+                "Height": 22,
+                "Width": 80
+              },
+              {
+                "WordText": ">",
+                "Left": 481,
+                "Top": 270,
+                "Height": 22,
+                "Width": 16
+              }
+            ],
+            "MaxHeight": 22,
+            "MinTop": 270
+          },
+          {
+            "LineText": "15.8",
+            "Words": [
+              {
+                "WordText": "15.8",
+                "Left": 452,
+                "Top": 332,
+                "Height": 24,
+                "Width": 46
+              }
+            ],
+            "MaxHeight": 24,
+            "MinTop": 332
+          },
+          {
+            "LineText": "iPhone 7 Plus",
+            "Words": [
+              {
+                "WordText": "iPhone",
+                "Left": 354,
+                "Top": 396,
+                "Height": 24,
+                "Width": 78
+              },
+              {
+                "WordText": "7",
+                "Left": 435,
+                "Top": 396,
+                "Height": 24,
+                "Width": 15
+              },
+              {
+                "WordText": "Plus",
+                "Left": 453,
+                "Top": 396,
+                "Height": 24,
+                "Width": 47
+              }
+            ],
+            "MaxHeight": 24,
+            "MinTop": 396
+          },
+          {
+            "LineText": "MNQQ2TH/A",
+            "Words": [
+              {
+                "WordText": "MNQQ2TH",
+                "Left": 360,
+                "Top": 462,
+                "Height": 24,
+                "Width": 142
+              },
+              {
+                "WordText": "/",
+                "Left": 360,
+                "Top": 462,
+                "Height": 24,
+                "Width": 142
+              },
+              {
+                "WordText": "A",
+                "Left": 360,
+                "Top": 462,
+                "Height": 24,
+                "Width": 142
+              }
+            ],
+            "MaxHeight": 24,
+            "MinTop": 462
+          },
+          {
+            "LineText": "FCDZWØR3HG07",
+            "Words": [
+              {
+                "WordText": "FCDZWØR3HG07",
+                "Left": 308,
+                "Top": 528,
+                "Height": 26,
+                "Width": 192
+              }
+            ],
+            "MaxHeight": 26,
+            "MinTop": 528
+          },
+          {
+            "LineText": "0",
+            "Words": [
+              {
+                "WordText": "0",
+                "Left": 486,
+                "Top": 940,
+                "Height": 22,
+                "Width": 16
+              }
+            ],
+            "MaxHeight": 22,
+            "MinTop": 940
+          }
+        ],
+        "HasOverlay": true
+      },
+      "TextOrientation": "0",
+      "FileParseExitCode": 1,
+      "ParsedText": "Lisas\t16:19\t34%\t\r\niPhone >\t\r\n15.8\t\r\niPhone 7 Plus\t\r\nMNQQ2TH/A\t\r\nFCDZWØR3HG07\t\r\n0\t\r\n",
+      "ErrorMessage": "",
+      "ErrorDetails": ""
+    }
+  ],
+  "OCRExitCode": 1,
+  "IsErroredOnProcessing": false,
+  "ProcessingTimeInMilliseconds": "626",
+  "SearchablePDFURL": "Searchable PDF not generated as it was not requested."
+}
