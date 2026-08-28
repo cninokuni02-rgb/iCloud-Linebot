@@ -1,7 +1,6 @@
 ﻿import os
 import re
 import json
-import random
 import httpx
 import requests
 from typing import Dict, Any, Optional
@@ -55,90 +54,70 @@ class ICloudChecker:
         """ยิงดึงข้อมูลสดจากฐานข้อมูล Apple GSX ผ่าน IMEICheck API"""
         if not self.imeicheck_key:
             return None
-        url = "https://api.imeicheck.net/v1/checks"
+        
         headers = {
             "Authorization": f"Bearer {self.imeicheck_key}",
             "Content-Type": "application/json"
         }
-        # Service ID 1 = Apple Basic / iCloud / FMI
-        service_id = int(self.imeicheck_service_id) if str(self.imeicheck_service_id).isdigit() else 1
-        payload = {
-            "deviceId": imei,
-            "serviceId": service_id
-        }
-        try:
-            res = requests.post(url, headers=headers, json=payload, timeout=25)
-            data = res.json()
-            if res.status_code in [200, 201]:
-                properties = data.get("properties", {})
-                
-                # ตรวจสอบสถานะ FMI (Find My iPhone)
-                fmi_on = properties.get("fmiOn")
-                fmi_status_str = str(properties.get("fmiStatus", "")).upper()
-                if fmi_on is True or "ON" in fmi_status_str:
-                    fmi = "ON"
-                elif fmi_on is False or "OFF" in fmi_status_str:
-                    fmi = "OFF"
-                else:
-                    fmi = "ON" if "ON" in json.dumps(properties).upper() else "OFF"
 
-                # ตรวจสอบสถานะ Clean vs Lost
-                lost_mode = properties.get("lostMode")
-                if lost_mode is True or "LOST" in json.dumps(properties).upper() or "STOLEN" in json.dumps(properties).upper():
-                    icloud_st = "LOST / STOLEN ⚠️"
-                else:
-                    icloud_st = "CLEAN ✅"
+        # ลอง Service ID 1 (Live) และ Service ID 12 (Sandbox)
+        target_services = [1, 12]
+        if self.imeicheck_service_id and self.imeicheck_service_id.isdigit():
+            target_services.insert(0, int(self.imeicheck_service_id))
 
-                model = properties.get("modelDesc") or properties.get("deviceName") or self.get_model_from_tac(imei)
-                serial = properties.get("serial") or properties.get("serialNumber") or "-"
-
-                return {
-                    "success": True,
-                    "imei": imei,
-                    "model": model,
-                    "serial": serial,
-                    "fmi_status": fmi,
-                    "icloud_status": icloud_st,
-                    "raw_text": json.dumps(properties, ensure_ascii=False, indent=2),
-                    "source": "Apple GSX Live Database"
+        for s_id in set(target_services):
+            try:
+                url = "https://api.imeicheck.net/v1/checks"
+                payload = {
+                    "deviceId": imei,
+                    "serviceId": s_id
                 }
-            elif "message" in data or "code" in data:
-                err_msg = data.get("message", "API Error")
-                if "ip_not_allowed" in str(data):
-                    err_msg = "⚠️ กรุณาปิดสวิตช์ IP Whitelist ในเว็บ imeicheck.net เพื่อให้บอทเข้าถึงได้ครับ"
-                return {"success": False, "error": err_msg, "source": "IMEICheck Live API"}
-        except Exception as e:
-            print(f"Error querying IMEICheck.net: {e}")
-        return None
+                res = requests.post(url, headers=headers, json=payload, timeout=25)
+                data = res.json()
+                if res.status_code in [200, 201]:
+                    properties = data.get("properties", {})
+                    
+                    # ตรวจสอบสถานะ FMI (Find My iPhone)
+                    fmi_on = properties.get("fmiOn")
+                    fmi_status_str = str(properties.get("fmiStatus", "")).upper()
+                    if fmi_on is True or "ON" in fmi_status_str:
+                        fmi = "ON"
+                    elif fmi_on is False or "OFF" in fmi_status_str:
+                        fmi = "OFF"
+                    else:
+                        fmi = "ON" if "ON" in json.dumps(properties).upper() else "OFF"
 
-    def check_sickw(self, imei: str) -> Optional[Dict[str, Any]]:
-        if not self.sickw_key:
-            return None
-        url = f"https://sickw.com/api.php?key={self.sickw_key}&service={self.sickw_service_id}&imei={imei}"
-        try:
-            res = requests.get(url, timeout=25)
-            data = res.json()
-            if data.get("status") == "success":
-                raw_text = data.get("result", "")
-                text_upper = raw_text.upper()
-                fmi = "ON" if "FIND MY IPHONE: ON" in text_upper or "FMI: ON" in text_upper else "OFF"
-                st = "LOST / STOLEN ⚠️" if "LOST" in text_upper else "CLEAN ✅"
-                model_match = re.search(r"Model(?:\s*Description)?:\s*([^\n\r<]+)", raw_text, re.IGNORECASE)
-                model = model_match.group(1).strip() if model_match else self.get_model_from_tac(imei)
-                sn_match = re.search(r"Serial(?:\s*Number)?:\s*([A-Za-z0-9]+)", raw_text, re.IGNORECASE)
-                serial = sn_match.group(1).strip() if sn_match else "-"
-                return {
-                    "success": True,
-                    "imei": imei,
-                    "model": model,
-                    "serial": serial,
-                    "fmi_status": fmi,
-                    "icloud_status": st,
-                    "raw_text": raw_text,
-                    "source": "Apple GSX Live Database"
-                }
-        except Exception as e:
-            print(f"Error querying SICKW: {e}")
+                    # ตรวจสอบสถานะ Clean vs Lost
+                    lost_mode = properties.get("lostMode")
+                    if lost_mode is True or "LOST" in json.dumps(properties).upper() or "STOLEN" in json.dumps(properties).upper():
+                        icloud_st = "LOST / STOLEN ⚠️"
+                    else:
+                        icloud_st = "CLEAN ✅"
+
+                    model = properties.get("deviceName") or properties.get("modelDesc") or self.get_model_from_tac(imei)
+                    serial = properties.get("serial") or properties.get("serialNumber") or "-"
+
+                    is_sandbox = "SANDBOX" in json.dumps(data).upper()
+                    source_label = "Apple GSX (IMEICheck Live)" if not is_sandbox else "IMEICheck API (Sandbox)"
+
+                    return {
+                        "success": True,
+                        "imei": imei,
+                        "model": model,
+                        "serial": serial,
+                        "fmi_status": fmi,
+                        "icloud_status": icloud_st,
+                        "raw_text": json.dumps(properties, ensure_ascii=False, indent=2),
+                        "source": source_label
+                    }
+                elif "ip_not_allowed" in str(data):
+                    return {
+                        "success": False, 
+                        "error": "⚠️ กรุณาปิดสวิตช์ IP Whitelist ในเว็บ imeicheck.net เพื่อให้บอทเข้าถึงได้ครับ",
+                        "source": "IMEICheck API"
+                    }
+            except Exception as e:
+                print(f"Error querying IMEICheck (Service {s_id}): {e}")
         return None
 
     def check(self, imei: str) -> Dict[str, Any]:
@@ -151,19 +130,13 @@ class ICloudChecker:
             if res:
                 return res
 
-        # 2. ยิงผ่าน SICKW
-        if self.sickw_key:
-            res = self.check_sickw(clean_imei)
-            if res:
-                return res
-
         return {
             "success": True,
             "imei": clean_imei,
             "model": detected_model,
             "serial": "F2L" + clean_imei[-7:],
             "fmi_status": "REQUIRE_API_KEY",
-            "icloud_status": "กำลังเชื่อมต่อ Live API",
+            "icloud_status": "กรุณาเชื่อมต่อ Live API",
             "raw_text": "",
             "source": "Smart TAC Identifier"
         }
