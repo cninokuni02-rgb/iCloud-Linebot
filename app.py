@@ -1,6 +1,7 @@
 ﻿import os
 import re
 import io
+import time
 import asyncio
 from typing import Optional, Tuple
 from dotenv import load_dotenv
@@ -57,8 +58,43 @@ if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
     handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
+@app.get("/api/speedtest")
+async def server_speedtest():
+    """วัดความเร็วดาวน์โหลด/อัปโหลด และค่า Ping ของเซิร์ฟเวอร์ Render สดๆ"""
+    results = {"server": "Render.com Cloud Node"}
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            # 1. วัด Ping
+            t0 = time.perf_counter()
+            await client.get("https://1.1.1.1")
+            results["ping_latency_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+
+            # 2. วัด Download Speed (10 MB Chunk)
+            url_down = "https://speed.cloudflare.com/__down?bytes=10000000"
+            t0 = time.perf_counter()
+            res_down = await client.get(url_down)
+            dur_down = time.perf_counter() - t0
+            down_mbps = (len(res_down.content) * 8) / (dur_down * 1_000_000)
+            results["download_speed_mbps"] = round(down_mbps, 2)
+            results["download_speed_MB_s"] = round(down_mbps / 8, 2)
+
+            # 3. วัด Upload Speed (5 MB Payload)
+            url_up = "https://speed.cloudflare.com/__up"
+            dummy_data = b"0" * 5000000
+            t0 = time.perf_counter()
+            await client.post(url_up, content=dummy_data)
+            dur_up = time.perf_counter() - t0
+            up_mbps = (5000000 * 8) / (dur_up * 1_000_000)
+            results["upload_speed_mbps"] = round(up_mbps, 2)
+            results["upload_speed_MB_s"] = round(up_mbps / 8, 2)
+            
+            results["status"] = "Success"
+    except Exception as e:
+        results["status"] = "Error"
+        results["error"] = str(e)
+    return results
+
 def fast_extract_device_info_from_image(image_bytes: bytes) -> Tuple[Optional[str], Optional[str]]:
-    """สแกนอ่านทั้ง IMEI (15 หลัก) และ เลขประจำเครื่อง/Serial Number (10-12 หลัก) จากรูปภาพอย่างแม่นยำ"""
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode != 'RGB':
@@ -88,17 +124,13 @@ def fast_extract_device_info_from_image(image_bytes: bytes) -> Tuple[Optional[st
             parsed = data.get("ParsedResults", [])
             if parsed:
                 raw_text = parsed[0].get("ParsedText", "")
-                
-                # 1. แปลงฟอนต์ตัวเลขพิเศษของ Apple (เช่น เลข 0 มีขีดฆ่า Ø)
                 normalized = raw_text.replace('Ø', '0').replace('ø', '0').replace('–', '-').replace('—', '-')
                 
-                # 2. ค้นหาเลขโมเดลที่แสดงบนจอ เช่น "iPhone 7 Plus"
                 detected_model = None
                 model_match = re.search(r"iPhone\s+[0-9A-Za-z\s\+]+", normalized, re.IGNORECASE)
                 if model_match:
                     detected_model = "Apple " + model_match.group(0).strip().split('\n')[0].split('\t')[0]
 
-                # 3. ค้นหา IMEI (15 หลัก)
                 direct_imei = re.findall(r"\b\d{15}\b", normalized)
                 if direct_imei:
                     return direct_imei[0], detected_model
@@ -108,14 +140,12 @@ def fast_extract_device_info_from_image(image_bytes: bytes) -> Tuple[Optional[st
                     if len(digits) == 15:
                         return digits, detected_model
                 
-                # 4. ค้นหาเลขประจำเครื่อง / Serial Number ของ Apple (10-12 หลัก เช่น FCDZW0R3HG07)
                 sn_candidates = re.findall(r"\b([A-HJ-NP-Z0-9]{10,12})\b", normalized)
                 for sn in sn_candidates:
                     if any(c.isdigit() for c in sn) and any(c.isalpha() for c in sn):
                         if not any(k in sn for k in ["MNQQ2", "IPHONE", "PLUS", "IOS", "ABOUT", "MODEL", "HTTP"]):
                             return sn, detected_model
                             
-                # 5. รวมตัวเลขทั้งหมดในกรณีที่เลขถูกตัด
                 all_digits = re.sub(r"[^\d]", "", normalized)
                 sub = re.findall(r"\d{15}", all_digits)
                 if sub:
@@ -223,7 +253,7 @@ async def home():
     <head><title>Apple GSX Live Checker Server</title><meta charset="utf-8"></head>
     <body style="background:#0f172a;color:#fff;text-align:center;padding:50px;">
         <h1>🍏 Apple GSX Live Checker Server</h1>
-        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live GSX ($0.01) + By บักวันซัย Active</p>
+        <p style="color:#10b981;font-weight:bold;">⚡ Status: Live GSX ($0.01) + Speedtest API Active</p>
     </body>
     </html>
     """
@@ -277,7 +307,6 @@ if handler:
             for chunk in message_content.iter_content():
                 image_bytes += chunk
 
-            # สแกนหาทั้ง IMEI และ Serial Number
             detected_id, detected_model = fast_extract_device_info_from_image(image_bytes)
 
             if detected_id:
