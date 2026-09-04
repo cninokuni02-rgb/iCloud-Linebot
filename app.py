@@ -1,8 +1,9 @@
-﻿import os
+import os
 import re
 import io
 import time
 import asyncio
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 from dotenv import load_dotenv
 import httpx
@@ -33,14 +34,20 @@ app = FastAPI(title="iCloud Check LINE Bot API", version="1.0.0")
 async def start_auto_keep_alive():
     async def ping_loop():
         await asyncio.sleep(30)
+        tz_th = timezone(timedelta(hours=7))  # เวลาประเทศไทย (UTC+7)
         while True:
-            try:
-                base_url = os.getenv("RENDER_EXTERNAL_URL", "https://icloud-linebot.onrender.com")
-                async with httpx.AsyncClient() as client:
-                    res = await client.get(f"{base_url}/", timeout=20)
-                    print(f"⚡ Anti-Sleep Ping: Sent to {base_url} (Status: {res.status_code})")
-            except Exception as e:
-                print(f"⚡ Anti-Sleep Notice: {e}")
+            current_hour = datetime.now(tz_th).hour
+            # หยุดสะกิดช่วงเที่ยงคืนถึงตี 5 (00:00 - 04:59 น.) เพื่อประหยัดโควตา Render
+            if 0 <= current_hour < 5:
+                print(f"🌙 Anti-Sleep Sleeping: พักเซิร์ฟเวอร์ช่วงดึก ({current_hour}:00 น.) ไม่ส่ง ping", flush=True)
+            else:
+                try:
+                    base_url = os.getenv("RENDER_EXTERNAL_URL", "https://icloud-linebot.onrender.com")
+                    async with httpx.AsyncClient() as client:
+                        res = await client.get(f"{base_url}/", timeout=20)
+                        print(f"⚡ Anti-Sleep Ping: Sent to {base_url} (Status: {res.status_code})", flush=True)
+                except Exception as e:
+                    print(f"⚡ Anti-Sleep Notice: {e}", flush=True)
             await asyncio.sleep(540)
 
     asyncio.create_task(ping_loop())
