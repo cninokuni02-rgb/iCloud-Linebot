@@ -29,26 +29,20 @@ IMEICHECK_API_KEY = os.getenv("IMEICHECK_API_KEY", "frJrawm6YcXMJCt3ee438roSW5HV
 
 app = FastAPI(title="iCloud Check LINE Bot API", version="1.0.0")
 
-# ----------------- ระบบกันหลับอัตโนมัติ (Anti-Sleep Engine) -----------------
+# ----------------- ระบบกันหลับอัตโนมัติ 24/7 (24/7 Anti-Sleep Engine) -----------------
 @app.on_event("startup")
 async def start_auto_keep_alive():
     async def ping_loop():
-        await asyncio.sleep(30)
-        tz_th = timezone(timedelta(hours=7))  # เวลาประเทศไทย (UTC+7)
+        await asyncio.sleep(15)
         while True:
-            current_hour = datetime.now(tz_th).hour
-            # หยุดสะกิดช่วงเที่ยงคืนถึงตี 5 (00:00 - 04:59 น.) เพื่อประหยัดโควตา Render
-            if 0 <= current_hour < 5:
-                print(f"🌙 Anti-Sleep Sleeping: พักเซิร์ฟเวอร์ช่วงดึก ({current_hour}:00 น.) ไม่ส่ง ping", flush=True)
-            else:
-                try:
-                    base_url = os.getenv("RENDER_EXTERNAL_URL", "https://icloud-linebot.onrender.com")
-                    async with httpx.AsyncClient() as client:
-                        res = await client.get(f"{base_url}/", timeout=20)
-                        print(f"⚡ Anti-Sleep Ping: Sent to {base_url} (Status: {res.status_code})", flush=True)
-                except Exception as e:
-                    print(f"⚡ Anti-Sleep Notice: {e}", flush=True)
-            await asyncio.sleep(540)
+            try:
+                base_url = os.getenv("RENDER_EXTERNAL_URL", "https://icloud-linebot.onrender.com")
+                async with httpx.AsyncClient() as client:
+                    res = await client.get(f"{base_url}/", timeout=20)
+                    print(f"⚡ 24/7 Anti-Sleep Ping: Sent to {base_url} (Status: {res.status_code})", flush=True)
+            except Exception as e:
+                print(f"⚡ Anti-Sleep Notice: {e}", flush=True)
+            await asyncio.sleep(300) # Ping every 5 minutes 24/7
 
     asyncio.create_task(ping_loop())
 
@@ -282,29 +276,58 @@ async def line_webhook(request: Request):
         raise HTTPException(status_code=400, detail="Invalid signature")
     return "OK"
 
+def extract_device_id_from_text(raw_msg: str) -> Optional[str]:
+    # 1. First, strip common prefixes like 'IMEI:', 'SN:', 'Serial Number:', 'IMEI1:', 'IMEI2:'
+    cleaned_text = re.sub(r"(?i)\b(imei\s*1?|imei\s*2?|sn|serial\s*number|serial)\s*[:=\-]?\s*", "", raw_msg)
+    
+    # 2. Extract 15 consecutive digits from raw_msg (covers cases like '35 483609 260074 0')
+    all_digits = re.sub(r"[^\d]", "", cleaned_text)
+    found_15 = re.findall(r"\d{15}", all_digits)
+    if found_15:
+        return found_15[0]
+    
+    # 3. Clean spaces/punctuation
+    clean_msg = re.sub(r"[\s\-\.\:\/\,]", "", cleaned_text).strip()
+    
+    # 4. Check if exact 15-digit IMEI
+    if len(clean_msg) == 15 and clean_msg.isdigit():
+        return clean_msg
+        
+    # 5. Check if valid Apple Serial Number (8 to 12 alphanumeric chars)
+    if bool(re.match(r"^[A-HJ-NP-Z0-9]{8,12}$", clean_msg, re.IGNORECASE)) and any(c.isdigit() for c in clean_msg) and any(c.isalpha() for c in clean_msg):
+        return clean_msg.upper()
+        
+    # 6. Fallback regex for serial number inside longer sentence
+    sn_found = re.findall(r"\b([A-HJ-NP-Z0-9]{8,12})\b", raw_msg.upper())
+    for sn in sn_found:
+        if any(c.isdigit() for c in sn) and any(c.isalpha() for c in sn):
+            if not any(k in sn for k in ["IPHONE", "PLUS", "MODEL", "HTTP"]):
+                return sn
+                
+    return None
+
 if handler:
     @handler.add(MessageEvent, message=TextMessage)
     def handle_line_text_message(event):
-        user_msg = event.message.text.strip()
-        is_imei = bool(re.match(r"^\d{15}$", user_msg))
-        is_sn = bool(re.match(r"^[A-Za-z0-9]{8,12}$", user_msg))
+        raw_msg = event.message.text.strip()
+        target_id = extract_device_id_from_text(raw_msg)
 
-        if not (is_imei or is_sn):
+        if not target_id:
             reply_txt = (
                 "👋 สวัสดีครับ!\n"
-                "• พิมพ์ส่งเลข **IMEI 15 หลัก** หรือ **Serial Number** ในแชท\n"
-                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง** ส่งมาได้เลย บอทจะอ่านเลขอัตโนมัติครับ! 📷"
+                "• พิมพ์ส่งเลข **IMEI 15 หลัก** หรือ **Serial Number** ในแชทได้ทันที (มีเว้นวรรคหรือขีดก็ตรวจได้)\n"
+                "• หรือ **ถ่ายรูปหน้าจอ / หลังกล่อง** ส่งมาได้เลย บอทจะสแกนเลขอัตโนมัติครับ! 📷"
             )
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_txt))
             return
 
         checker = get_checker()
-        res = checker.check(user_msg)
+        res = checker.check(target_id)
         if res.get("success"):
             flex_card = build_flex_message(res)
             line_bot_api.reply_message(event.reply_token, flex_card)
         else:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ ตรวจสอบไม่สำเร็จ"))
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ ตรวจสอบไม่สำเร็จ กรุณาตรวจสอบเลข IMEI/Serial อีกครั้งครับ"))
 
     @handler.add(MessageEvent, message=ImageMessage)
     def handle_line_image_message(event):
