@@ -3,6 +3,7 @@ import re
 import io
 import time
 import asyncio
+import gc
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 from dotenv import load_dotenv
@@ -29,6 +30,15 @@ IMEICHECK_API_KEY = os.getenv("IMEICHECK_API_KEY", "frJrawm6YcXMJCt3ee438roSW5HV
 
 app = FastAPI(title="iCloud Check LINE Bot API", version="1.0.0")
 
+# Shared AsyncClient to avoid socket & memory accumulation
+_shared_client: Optional[httpx.AsyncClient] = None
+
+def get_shared_client() -> httpx.AsyncClient:
+    global _shared_client
+    if _shared_client is None or _shared_client.is_closed:
+        _shared_client = httpx.AsyncClient(timeout=25.0)
+    return _shared_client
+
 # ----------------- ระบบกันหลับอัตโนมัติ 24/7 (24/7 Anti-Sleep Engine) -----------------
 @app.on_event("startup")
 async def start_auto_keep_alive():
@@ -37,14 +47,20 @@ async def start_auto_keep_alive():
         while True:
             try:
                 base_url = os.getenv("RENDER_EXTERNAL_URL", "https://icloud-linebot.onrender.com")
-                async with httpx.AsyncClient() as client:
-                    res = await client.get(f"{base_url}/", timeout=20)
-                    print(f"⚡ 24/7 Anti-Sleep Ping: Sent to {base_url} (Status: {res.status_code})", flush=True)
+                client = get_shared_client()
+                res = await client.get(f"{base_url}/", timeout=15)
+                print(f"⚡ 24/7 Anti-Sleep Ping: Sent to {base_url} (Status: {res.status_code})", flush=True)
             except Exception as e:
                 print(f"⚡ Anti-Sleep Notice: {e}", flush=True)
             await asyncio.sleep(300) # Ping every 5 minutes 24/7
 
     asyncio.create_task(ping_loop())
+
+@app.on_event("shutdown")
+async def shutdown_client():
+    global _shared_client
+    if _shared_client and not _shared_client.is_closed:
+        await _shared_client.aclose()
 
 def get_checker():
     load_dotenv(override=True)
@@ -61,53 +77,69 @@ if LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET:
 
 @app.get("/api/speedtest")
 async def server_speedtest():
-    """วัดความเร็วดาวน์โหลด/อัปโหลด และค่า Ping ของเซิร์ฟเวอร์ Render สดๆ"""
+    """วัดความเร็วดาวน์โหลด/อัปโหลด และค่า Ping ของเซิร์ฟเวอร์ Render สดๆ (ประหยัดแรม)"""
     results = {"server": "Render.com Cloud Node"}
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            # 1. วัด Ping
-            t0 = time.perf_counter()
-            await client.get("https://1.1.1.1")
-            results["ping_latency_ms"] = round((time.perf_counter() - t0) * 1000, 2)
+        client = get_shared_client()
+        # 1. วัด Ping
+        t0 = time.perf_counter()
+        await client.get("https://1.1.1.1")
+        results["ping_latency_ms"] = round((time.perf_counter() - t0) * 1000, 2)
 
-            # 2. วัด Download Speed (10 MB Chunk)
-            url_down = "https://speed.cloudflare.com/__down?bytes=10000000"
-            t0 = time.perf_counter()
-            res_down = await client.get(url_down)
-            dur_down = time.perf_counter() - t0
-            down_mbps = (len(res_down.content) * 8) / (dur_down * 1_000_000)
-            results["download_speed_mbps"] = round(down_mbps, 2)
-            results["download_speed_MB_s"] = round(down_mbps / 8, 2)
+        # 2. วัด Download Speed แบบ streaming chunk (ไม่กิน RAM)
+        url_down = "https://speed.cloudflare.com/__down?bytes=2000000" # 2 MB chunk พอสำหรับวัด
+        t0 = time.perf_counter()
+        total_bytes = 0
+        async with client.stream("GET", url_down) as res:
+            async for chunk in res.aiter_bytes():
+                total_bytes += len(chunk)
+        dur_down = max(time.perf_counter() - t0, 0.001)
+        down_mbps = (total_bytes * 8) / (dur_down * 1_000_000)
+        results["download_speed_mbps"] = round(down_mbps, 2)
+        results["download_speed_MB_s"] = round(down_mbps / 8, 2)
 
-            # 3. วัด Upload Speed (5 MB Payload)
-            url_up = "https://speed.cloudflare.com/__up"
-            dummy_data = b"0" * 5000000
-            t0 = time.perf_counter()
-            await client.post(url_up, content=dummy_data)
-            dur_up = time.perf_counter() - t0
-            up_mbps = (5000000 * 8) / (dur_up * 1_000_000)
-            results["upload_speed_mbps"] = round(up_mbps, 2)
-            results["upload_speed_MB_s"] = round(up_mbps / 8, 2)
-            
-            results["status"] = "Success"
+        # 3. วัด Upload Speed (1 MB)
+        url_up = "https://speed.cloudflare.com/__up"
+        dummy_data = b"0" * 1000000
+        t0 = time.perf_counter()
+        await client.post(url_up, content=dummy_data)
+        dur_up = max(time.perf_counter() - t0, 0.001)
+        up_mbps = (1000000 * 8) / (dur_up * 1_000_000)
+        results["upload_speed_mbps"] = round(up_mbps, 2)
+        results["upload_speed_MB_s"] = round(up_mbps / 8, 2)
+        
+        del dummy_data
+        gc.collect()
+        results["status"] = "Success"
     except Exception as e:
         results["status"] = "Error"
         results["error"] = str(e)
     return results
 
 def fast_extract_device_info_from_image(image_bytes: bytes) -> Tuple[Optional[str], Optional[str]]:
+    img = None
+    opt_bytes = None
     try:
-        img = Image.open(io.BytesIO(image_bytes))
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-        
-        img.thumbnail((1200, 1200), Image.Resampling.LANCZOS)
+        # เปิดภาพด้วย Pillow และย่อขนาดเพื่อประหยัด RAM
+        with Image.open(io.BytesIO(image_bytes)) as original_img:
+            if original_img.mode != 'RGB':
+                img = original_img.convert('RGB')
+            else:
+                img = original_img.copy()
+
+        # ปรับขนาดไม่เกิน 1024x1024 เพื่อลดการใช้ RAM และส่ง OCR เร็วขึ้น
+        img.thumbnail((1024, 1024), Image.Resampling.BILINEAR)
         enhancer = ImageEnhance.Contrast(img)
-        img = enhancer.enhance(1.4)
+        img = enhancer.enhance(1.3)
         
         out = io.BytesIO()
-        img.save(out, format='JPEG', quality=85, optimize=True)
+        img.save(out, format='JPEG', quality=80, optimize=True)
         opt_bytes = out.getvalue()
+        out.close()
+        
+        # ปล่อยแรมรูปภาพทันที
+        del img
+        gc.collect()
         
         url = "https://api.ocr.space/parse/image"
         payload = {
@@ -119,6 +151,9 @@ def fast_extract_device_info_from_image(image_bytes: bytes) -> Tuple[Optional[st
         }
         files = {"file": ("image.jpg", opt_bytes, "image/jpeg")}
         res = requests.post(url, data=payload, files=files, timeout=12)
+        
+        del opt_bytes
+        gc.collect()
         
         if res.status_code == 200:
             data = res.json()
@@ -153,6 +188,8 @@ def fast_extract_device_info_from_image(image_bytes: bytes) -> Tuple[Optional[st
                     return sub[0], detected_model
     except Exception as e:
         print(f"Device Info OCR Error: {e}")
+    finally:
+        gc.collect()
     return None, None
 
 def build_flex_message(data: dict) -> FlexSendMessage:
@@ -331,13 +368,21 @@ if handler:
 
     @handler.add(MessageEvent, message=ImageMessage)
     def handle_line_image_message(event):
+        image_bytes = None
         try:
             message_content = line_bot_api.get_message_content(event.message.id)
-            image_bytes = b""
+            byte_chunks = []
             for chunk in message_content.iter_content():
-                image_bytes += chunk
+                byte_chunks.append(chunk)
+            image_bytes = b"".join(byte_chunks)
+            del byte_chunks
 
             detected_id, detected_model = fast_extract_device_info_from_image(image_bytes)
+
+            # Release raw image bytes immediately
+            del image_bytes
+            image_bytes = None
+            gc.collect()
 
             if detected_id:
                 checker = get_checker()
@@ -359,3 +404,7 @@ if handler:
         except Exception as e:
             print(f"Image Handle Error: {e}")
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ เกิดข้อผิดพลาดในการประมวลผลรูปภาพ"))
+        finally:
+            if image_bytes is not None:
+                del image_bytes
+            gc.collect()
